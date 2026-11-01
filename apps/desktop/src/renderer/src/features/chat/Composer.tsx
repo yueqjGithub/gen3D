@@ -1,0 +1,125 @@
+import { useRef, useState, type ChangeEvent, type FormEvent } from 'react';
+import {
+  MAX_ATTACHMENT_BYTES,
+  supportedMediaTypes,
+  type UploadMetadata,
+} from '@agent3d/shared';
+
+export interface ComposerProps {
+  onUpload(file: File): Promise<UploadMetadata>;
+  onSubmit(text: string, attachments: UploadMetadata[]): Promise<void> | void;
+  disabled: boolean;
+}
+
+export function Composer({ onUpload, onSubmit, disabled }: ComposerProps) {
+  const [text, setText] = useState('');
+  const [attachments, setAttachments] = useState<UploadMetadata[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function selectFiles(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = '';
+    setError(null);
+    for (const file of files) {
+      if (!supportedMediaTypes.includes(file.type as (typeof supportedMediaTypes)[number])) {
+        setError('仅支持 PNG、JPEG、WebP、PDF、Markdown 或纯文本文件。');
+        continue;
+      }
+      if (file.size === 0 || file.size > MAX_ATTACHMENT_BYTES) {
+        setError(`文件大小需在 1 至 ${MAX_ATTACHMENT_BYTES} 字节之间。`);
+        continue;
+      }
+
+      setUploading(true);
+      try {
+        const uploaded = await onUpload(file);
+        setAttachments((current) => [...current, uploaded]);
+      } catch (uploadError) {
+        setError(uploadError instanceof Error ? uploadError.message : '文件上传失败。');
+      } finally {
+        setUploading(false);
+      }
+    }
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (disabled || uploading || (!text.trim() && attachments.length === 0)) {
+      return;
+    }
+    try {
+      await onSubmit(text.trim(), attachments);
+      setText('');
+      setAttachments([]);
+      setError(null);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : '消息发送失败。');
+    }
+  }
+
+  return (
+    <form className="composer" onSubmit={(event) => void submit(event)}>
+      {attachments.length > 0 && (
+        <ul className="composer__attachments" aria-label="待发送附件">
+          {attachments.map((attachment) => (
+            <li key={attachment.id}>
+              <span>{attachment.fileName}</span>
+              <small>{Math.ceil(attachment.size / 1024)} KB</small>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="inline-error" role="alert">{error}</p>}
+      {uploading && <p className="composer__upload-status" role="status">正在上传附件…</p>}
+      <label className="visually-hidden" htmlFor="chat-prompt">写下你的想法</label>
+      <textarea
+        id="chat-prompt"
+        aria-label="写下你的想法"
+        placeholder="描述你想创造的 3D 资产…"
+        maxLength={8000}
+        rows={3}
+        value={text}
+        disabled={disabled}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }
+        }}
+      />
+      <div className="composer__toolbar">
+        <input
+          ref={inputRef}
+          className="visually-hidden"
+          type="file"
+          accept={supportedMediaTypes.join(',')}
+          aria-label="添加图片或文档"
+          multiple
+          disabled={disabled || uploading}
+          onChange={(event) => void selectFiles(event)}
+        />
+        <button
+          type="button"
+          className="composer__attach"
+          aria-label="选择文件"
+          disabled={disabled || uploading}
+          onClick={() => inputRef.current?.click()}
+        >
+          ＋ 添加图片或文档
+        </button>
+        <span className="composer__hint">Enter 发送 · Shift+Enter 换行</span>
+        <button
+          type="submit"
+          className="composer__send"
+          disabled={disabled || uploading || (!text.trim() && attachments.length === 0)}
+          aria-label="发送"
+        >
+          发送 <span aria-hidden="true">↑</span>
+        </button>
+      </div>
+    </form>
+  );
+}

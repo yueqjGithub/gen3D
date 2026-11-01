@@ -1,0 +1,13 @@
+packages:
+  - apps/*
+  - packages/*
+minimumReleaseAgeExclude:
+  - electron@45.2.1
+  - sass@1.107.1
+  - '@mastra/core@1.81.0'
+  - '@ai-sdk/anthropic@4.0.94'
+  - '@ai-sdk/gateway@4.0.132'
+  - ai@7.0.159
+  - '@ai-sdk/react@4.0.163'
+allowBuilds:
+  '@parcel/watcher': false

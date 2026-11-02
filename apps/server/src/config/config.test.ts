@@ -19,15 +19,89 @@ describe('model configuration', () => {
   it('readsExplicitMockModeAndEmptyDevelopmentCredentials', () => {
     expect(readServerEnvironment({
       AGENT3D_MOCK_MODE: 'true',
+      AGENT3D_SERVER_URL: 'http://127.0.0.1:62686',
+      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
+      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
+      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687/',
+      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
       AGENT3D_CHAT_API_KEY: '',
       AGENT3D_IMAGE_API_KEY: '',
     })).toEqual({
       mockMode: true,
       chatApiKey: null,
       imageApiKey: null,
+      serverUrl: 'http://127.0.0.1:62686',
+      serverPort: 62686,
+      serverToken: 'test-only-server-token',
+      rendererOrigin: 'http://localhost:5173',
+      agentServiceUrl: 'http://127.0.0.1:62687',
+      agentServiceToken: 'test-only-agent-token',
+      credentialBrokerPort: 62588,
+      credentialBrokerToken: 'test-only-broker-token',
     });
 
     expect(() => readServerEnvironment({ AGENT3D_MOCK_MODE: 'sometimes' })).toThrow();
+  });
+
+  it('readsAndValidatesCredentialBrokerSettings', () => {
+    expect(readServerEnvironment({
+      AGENT3D_SERVER_URL: 'http://127.0.0.1:62686',
+      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
+      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
+      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687',
+      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
+      AGENT3D_CREDENTIAL_BROKER_PORT: '62589',
+    })).toMatchObject({
+      credentialBrokerPort: 62589,
+      credentialBrokerToken: 'test-only-broker-token',
+      serverPort: 62686,
+    });
+    expect(() => readServerEnvironment({
+      AGENT3D_SERVER_URL: 'http://127.0.0.1:62686',
+      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
+      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
+      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687',
+      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
+      AGENT3D_CREDENTIAL_BROKER_PORT: '70000',
+    })).toThrow('AGENT3D_CREDENTIAL_BROKER_PORT');
+    expect(() => readServerEnvironment({
+      AGENT3D_SERVER_URL: 'http://127.0.0.1:70000',
+      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
+      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687',
+      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
+      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
+    })).toThrow('AGENT3D_SERVER_URL');
+  });
+
+  it('requiresALoopbackAgentUrlAndInternalToken', () => {
+    const validEnvironment = {
+      AGENT3D_SERVER_URL: 'http://127.0.0.1:62686',
+      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
+      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
+      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687',
+      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
+    };
+
+    expect(() => readServerEnvironment({
+      ...validEnvironment,
+      AGENT3D_AGENT_URL: undefined,
+    })).toThrow('AGENT3D_AGENT_URL');
+    expect(() => readServerEnvironment({
+      ...validEnvironment,
+      AGENT3D_AGENT_URL: 'http://192.0.2.10:62687',
+    })).toThrow('127.0.0.1');
+    expect(() => readServerEnvironment({
+      ...validEnvironment,
+      AGENT3D_AGENT_TOKEN: '',
+    })).toThrow('AGENT3D_AGENT_TOKEN');
+    expect(() => readServerEnvironment({
+      ...validEnvironment,
+      AGENT3D_SERVER_TOKEN: '',
+    })).toThrow('AGENT3D_SERVER_TOKEN');
+    expect(() => readServerEnvironment({
+      ...validEnvironment,
+      AGENT3D_CREDENTIAL_BROKER_TOKEN: '',
+    })).toThrow('AGENT3D_CREDENTIAL_BROKER_TOKEN');
   });
 
   it('usesAgnesDefaultsForIndependentModels', async () => {

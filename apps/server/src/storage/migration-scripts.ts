@@ -1,9 +1,16 @@
-import initialMigration from './migrations/001-initial.sql?raw';
-import settingsMigration from './migrations/002-settings.sql?raw';
-import chatTurnsMigration from './migrations/003-chat-turns.sql?raw';
+import { readFileSync } from 'node:fs';
 
 export const databaseMigrations = [
-  { version: 1, sql: initialMigration },
-  { version: 2, sql: settingsMigration },
-  { version: 3, sql: chatTurnsMigration },
+  {
+    version: 1,
+    sql: readFileSync(new URL('./migrations/001-initial.sql', import.meta.url), 'utf8'),
+  },
+  {
+    version: 2,
+    sql: readFileSync(new URL('./migrations/002-settings.sql', import.meta.url), 'utf8'),
+  },
+  {
+    version: 3,
+    sql: readFileSync(new URL('./migrations/003-chat-turns.sql', import.meta.url), 'utf8'),
+  },
 ] as const;

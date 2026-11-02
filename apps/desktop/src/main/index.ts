@@ -1,28 +1,61 @@
 import { app, BrowserWindow, dialog, Menu, safeStorage } from 'electron';
-import { randomBytes } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { CredentialStore } from '@agent3d/shared';
-import { createApp } from '../../../server/src/app.js';
-import { createMastra } from '../../../server/src/agent/mastra.js';
-import { createMastraModel } from '../../../server/src/agent/model-adapter.js';
-import { createMockModelAgent } from '../../../server/src/testing/mock-model.js';
-import { readServerEnvironment } from '../../../server/src/config/env.js';
-import { resolveModel } from '../../../server/src/config/model-resolver.js';
-import { createSettingsRepository } from '../../../server/src/config/settings-repository.js';
-import { createArtifactRepository } from '../../../server/src/storage/artifacts.js';
-import { createAttachmentStore } from '../../../server/src/storage/attachments.js';
-import { createConversationRepository } from '../../../server/src/storage/conversations.js';
-import { createDatabase } from '../../../server/src/storage/database.js';
-import { createPreferenceRepository } from '../../../server/src/storage/preferences.js';
-import { listenLocalApi, registerServerShutdown } from '../../../server/src/dev.js';
+import {
+  assertDataDirectoryMatches,
+  resolveDataDirectory,
+} from '../../../server/src/config/data-directory.js';
 import { createSafeStorageCredentialStore } from './credentials.js';
+import { startCredentialBroker } from './credential-broker.js';
 import { createApplicationMenuTemplate } from './devtools.js';
+import {
+  createRendererArguments,
+  readRendererServerConfig,
+} from './renderer-arguments.js';
 import { createWindowOwner } from './window-owner.js';
 
 const appRoot = fileURLToPath(new URL('.', import.meta.url));
 const mainWindowOwner = createWindowOwner<BrowserWindow>();
+
+function readCredentialBrokerConfig(source: Record<string, string | undefined>) {
+  const port = source.AGENT3D_CREDENTIAL_BROKER_PORT === undefined
+    ? 62588
+    : Number(source.AGENT3D_CREDENTIAL_BROKER_PORT.trim());
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new TypeError('AGENT3D_CREDENTIAL_BROKER_PORT must be a valid TCP port.');
+  }
+  const token = source.AGENT3D_CREDENTIAL_BROKER_TOKEN?.trim();
+  if (!token) {
+    throw new TypeError('AGENT3D_CREDENTIAL_BROKER_TOKEN must be configured.');
+  }
+  return { port, token };
+}
+
+function registerCredentialBrokerShutdown(
+  close: () => Promise<void>,
+  quit: () => void,
+): void {
+  let stopping = false;
+  let finished = false;
+  app.on('before-quit', (event) => {
+    if (finished) {
+      return;
+    }
+    event.preventDefault();
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    void close().then(() => {
+      finished = true;
+      quit();
+    }).catch((error: unknown) => {
+      console.error('Failed to close the credential broker cleanly.', error);
+      finished = true;
+      quit();
+    });
+  });
+}
 
 function createWindow(apiBaseUrl: string, apiToken: string): void {
   const window = new BrowserWindow({
@@ -37,10 +70,7 @@ function createWindow(apiBaseUrl: string, apiToken: string): void {
       nodeIntegration: false,
       sandbox: true,
       devTools: !app.isPackaged,
-      additionalArguments: [
-        `--agent3d-api-base-url=${apiBaseUrl}`,
-        `--agent3d-api-token=${apiToken}`,
-      ],
+      additionalArguments: createRendererArguments(apiBaseUrl, apiToken),
     },
   });
   mainWindowOwner.retain(window);
@@ -66,98 +96,38 @@ async function startDesktopApplication(): Promise<void> {
   });
   Menu.setApplicationMenu(menuTemplate ? Menu.buildFromTemplate(menuTemplate) : null);
 
-  const environment = readServerEnvironment();
-  const userDataDirectory = app.getPath('userData');
-  const dataDirectory = join(userDataDirectory, 'data');
-  mkdirSync(dataDirectory, { recursive: true });
-
-  const database = createDatabase(join(dataDirectory, 'agent3d.sqlite'));
-  const secureCredentials = createSafeStorageCredentialStore(safeStorage, userDataDirectory);
-  const disabledEnvironmentProviders = new Set<string>();
-  const credentials: CredentialStore = {
-    async get(providerId) {
-      const saved = await secureCredentials.get(providerId);
-      if (saved) {
-        return saved;
-      }
-      if (providerId === 'agnes' && !disabledEnvironmentProviders.has(providerId)) {
-        return environment.chatApiKey;
-      }
-      return null;
-    },
-    async set(providerId, secret) {
-      disabledEnvironmentProviders.delete(providerId);
-      await secureCredentials.set(providerId, secret);
-    },
-    async delete(providerId) {
-      disabledEnvironmentProviders.add(providerId);
-      await secureCredentials.delete(providerId);
-    },
-  };
-  const conversations = createConversationRepository(database.connection);
-  const artifacts = createArtifactRepository(database.connection);
-  const attachments = createAttachmentStore(
-    database.connection,
-    join(dataDirectory, 'attachments'),
+  const rendererServer = readRendererServerConfig();
+  const credentialBrokerConfig = readCredentialBrokerConfig(process.env);
+  const configuredUserDataDirectory = resolveDataDirectory(
+    process.env,
+    process.platform,
+    app.getPath('home'),
+    app.getName(),
   );
-  const preferences = createPreferenceRepository(database.connection);
-  const settings = createSettingsRepository(database.connection, credentials);
-  const token = randomBytes(32).toString('base64url');
-  const rendererOrigin = process.env.ELECTRON_RENDERER_URL
-    ? new URL(process.env.ELECTRON_RENDERER_URL).origin
-    : 'null';
-  const api = createApp({
-    auth: { allowedOrigin: rendererOrigin, token },
-    conversations,
-    artifacts,
-    attachments,
-    preferences,
-    settings,
-    credentials,
-    resolveModel: (selection, role) => environment.mockMode
-      ? Promise.resolve({
-        providerId: 'mock',
-        modelId: 'mock/model',
-        baseURL: 'http://127.0.0.1',
-        protocol: 'openai-compatible',
-        supportsInlineImages: true,
-        apiKey: 'mock-only-key',
-      })
-      : resolveModel(selection, role, credentials),
-    createAgent: (model) => {
-      if (environment.mockMode) {
-        return createMockModelAgent();
-      }
-      return createMastra({
-        model: createMastraModel(model),
-        preferences,
-        attachments,
-        supportsInlineImages: model.supportsInlineImages,
-      }).getAgent('assetAgent');
-    },
+  if (process.env.AGENT3D_DATA_DIR?.trim()) {
+    app.setPath('userData', configuredUserDataDirectory);
+  }
+  const userDataDirectory = app.getPath('userData');
+  assertDataDirectoryMatches(configuredUserDataDirectory, userDataDirectory);
+  const secureCredentials = createSafeStorageCredentialStore(safeStorage, userDataDirectory);
+  const credentialBroker = await startCredentialBroker({
+    store: secureCredentials,
+    token: credentialBrokerConfig.token,
+    port: credentialBrokerConfig.port,
   });
-
-  let server: Awaited<ReturnType<typeof listenLocalApi>>;
-  try {
-    server = await listenLocalApi(api);
-  } catch (error) {
-    database.close();
-    throw error;
-  }
   if (!app.isPackaged) {
-    console.info('Local API listening at', server.baseUrl);
+    console.info('Credential broker listening at', credentialBroker.baseURL);
   }
-  let shutdown: Promise<void> | null = null;
-  registerServerShutdown(app, () => {
-    shutdown ??= server.close().then(() => database.close());
-    return shutdown;
-  }, () => app.quit());
+  registerCredentialBrokerShutdown(() => credentialBroker.close(), () => app.quit());
 
-  createWindow(server.baseUrl, token);
+  createWindow(
+    rendererServer.serverUrl,
+    rendererServer.serverToken,
+  );
 
   app.on('activate', () => {
     if (mainWindowOwner.current === null) {
-      createWindow(server.baseUrl, token);
+      createWindow(rendererServer.serverUrl, rendererServer.serverToken);
     }
   });
 }
@@ -166,7 +136,7 @@ app.whenReady().then(startDesktopApplication).catch((error: unknown) => {
   console.error('Failed to start the desktop application.', error);
   dialog.showErrorBox(
     '应用启动失败',
-    '本地 Agent 服务未能启动。请检查应用数据目录和运行时配置后重试。',
+    '桌面应用未能启动。请检查本地数据目录和运行时配置后重试。',
   );
   app.quit();
 });

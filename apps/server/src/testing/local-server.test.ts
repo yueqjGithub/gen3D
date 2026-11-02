@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AgentOutput } from '@agent3d/shared';
 import { createApp } from '../app';
+import type { AgentClient } from '../agent-client';
 import { listenLocalApi, registerServerShutdown } from '../dev';
-import { createMockModelAgent } from './mock-model';
 import { createArtifactRepository } from '../storage/artifacts';
 import { createAttachmentStore } from '../storage/attachments';
 import { createConversationRepository } from '../storage/conversations';
@@ -16,6 +17,51 @@ import { createSettingsRepository } from '../config/settings-repository';
 
 const token = 'mock-test-launch-token';
 const origin = 'null';
+
+const fakeAgentClient: AgentClient = {
+  async *stream(_request, { signal }) {
+    if (signal.aborted) {
+      throw new DOMException('Request aborted.', 'AbortError');
+    }
+    yield { type: 'reasoning-start', id: 'mock-reasoning' };
+    yield {
+      type: 'reasoning-delta',
+      id: 'mock-reasoning',
+      delta: 'I am preparing a reviewable draft.',
+    };
+    yield { type: 'reasoning-end', id: 'mock-reasoning' };
+    yield {
+      type: 'tool-input-start',
+      toolCallId: 'mock-analyze',
+      toolName: 'analyze-input',
+    };
+    yield { type: 'text-start', id: 'mock-reply' };
+    yield {
+      type: 'text-delta',
+      id: 'mock-reply',
+      delta: 'I prepared a Blender 4.x bowl draft for review.',
+    };
+    yield { type: 'text-end', id: 'mock-reply' };
+    const output: AgentOutput = {
+      type: 'asset',
+      brief: 'A small stoneware bowl with a gently irregular rim.',
+      script: [
+        'import bpy',
+        'import math',
+        '',
+        'bpy.ops.mesh.primitive_cylinder_add(vertices=48, radius=1.0, depth=0.25)',
+        'bowl = bpy.context.object',
+        'bowl.name = "Stoneware Bowl"',
+        'bowl.modifiers.new(name="Solidify", type="SOLIDIFY").thickness = 0.12',
+        'bowl.modifiers.new(name="Subdivision", type="SUBSURF").levels = 2',
+      ].join('\n'),
+      blenderVersion: '4.x',
+      preferenceProposals: [],
+    };
+    yield { type: 'data-structured-output', data: { object: { result: output } } };
+    yield { type: 'finish', finishReason: 'stop' };
+  },
+};
 
 function createFixture() {
   const directory = mkdtempSync(join(tmpdir(), 'agent3d-mock-'));
@@ -46,7 +92,7 @@ function createFixture() {
       supportsInlineImages: true,
       apiKey: 'mock-only-key',
     }),
-    createAgent: () => createMockModelAgent(),
+    agentClient: fakeAgentClient,
   });
 
   return {
@@ -74,7 +120,7 @@ afterEach(async () => {
   fixtures.splice(0).forEach(({ close }) => close());
 });
 
-describe('local mock server', () => {
+describe('local Hono API server', () => {
   it('bindsOnlyToLoopback', async () => {
     const fixture = createFixture();
     fixtures.push(fixture);

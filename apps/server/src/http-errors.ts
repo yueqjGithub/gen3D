@@ -12,7 +12,9 @@ import {
   ChatTurnPayloadConflictError,
 } from './storage/conversations';
 import { ProviderNotConfiguredError, UnsupportedProviderError } from './config/model-resolver';
-import { UnsupportedInlineImageError } from './agent/tools/analyze-input';
+import { UnsupportedInlineImageError } from './attachments/prepare-conversation-input';
+import { CredentialBrokerUnavailableError } from './config/credential-client';
+import { AgentServiceUnavailableError } from './agent-client';
 
 export type HttpStatus = 400 | 403 | 404 | 409 | 413 | 422 | 500 | 502;
 
@@ -63,6 +65,26 @@ export function toApiErrorResponse(error: unknown): ApiErrorResponse {
         code: 'PROVIDER_UNCONFIGURED',
         message: error.message,
         retryable: false,
+      }),
+    };
+  }
+  if (error instanceof CredentialBrokerUnavailableError) {
+    return {
+      status: 502,
+      body: apiErrorSchema.parse({
+        code: 'INTERNAL_ERROR',
+        message: 'The local credential service is unavailable. Retry the request.',
+        retryable: true,
+      }),
+    };
+  }
+  if (error instanceof AgentServiceUnavailableError) {
+    return {
+      status: 502,
+      body: apiErrorSchema.parse({
+        code: 'INTERNAL_ERROR',
+        message: 'The Agent service is unavailable. Retry the request.',
+        retryable: true,
       }),
     };
   }

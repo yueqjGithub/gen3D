@@ -11,7 +11,7 @@ import type { createArtifactRepository } from './storage/artifacts';
 import type { createConversationRepository } from './storage/conversations';
 import type { PreferenceRepository } from './storage/preferences';
 import type { createSettingsRepository } from './config/settings-repository';
-import type { MastraChatAgent } from './streaming/mastra-ui-stream';
+import type { AgentClient } from './agent-client';
 import { toApiErrorResponse } from './http-errors';
 import { createLocalOriginMiddleware, type LocalOriginOptions } from './middleware/local-origin';
 
@@ -27,7 +27,7 @@ export interface CreateAppDependencies {
     selection: ModelConfig,
     role: 'chat',
   ) => Promise<ResolvedModelConfig>;
-  createAgent: (model: ResolvedModelConfig) => MastraChatAgent;
+  agentClient: AgentClient;
 }
 
 export function createApp(dependencies: CreateAppDependencies) {

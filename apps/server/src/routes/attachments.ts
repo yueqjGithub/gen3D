@@ -5,7 +5,7 @@ import {
 } from '@agent3d/shared';
 import type { AttachmentStore } from '../storage/attachments';
 import type { createConversationRepository } from '../storage/conversations';
-import { extractDocument } from '../agent/extract-document';
+import { extractDocument } from '../attachments/extract-document';
 import { HttpError } from '../http-errors';
 
 type ConversationRepository = ReturnType<typeof createConversationRepository>;

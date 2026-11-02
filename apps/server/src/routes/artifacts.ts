@@ -2,11 +2,11 @@ import { Hono } from 'hono';
 import {
   artifactApprovalSchema,
   assetArtifactSchema,
+  validateBlenderScript,
 } from '@agent3d/shared';
 import { z } from 'zod';
 import type { createArtifactRepository } from '../storage/artifacts';
 import { HttpError } from '../http-errors';
-import { validateBlenderScript } from '../agent/validate-script';
 
 type ArtifactRepository = ReturnType<typeof createArtifactRepository>;
 

@@ -1,16 +1,14 @@
-import { createTool } from '@mastra/core/tools';
 import { supportedImageMediaTypes } from '@agent3d/shared';
-import { z } from 'zod';
-import type { AttachmentStore } from '../../storage/attachments';
+import type { AttachmentStore } from '../storage/attachments';
 import {
   extractDocument,
   MAX_EXTRACTED_DOCUMENT_CHARACTERS,
-} from '../extract-document';
+} from './extract-document';
 
 const imageMediaTypes: ReadonlySet<string> = new Set(supportedImageMediaTypes);
 
 export interface PreparedConversationInput {
-  documents: Array<{ fileName: string; text: string }>;
+  documents: Array<{ fileName: string; mediaType: string; text: string }>;
   images: Array<{ fileName: string; mediaType: string; dataUrl: string }>;
 }
 
@@ -77,44 +75,9 @@ export async function prepareConversationInput(
           `Combined document context exceeds ${MAX_EXTRACTED_DOCUMENT_CHARACTERS} characters.`,
         );
       }
-      documents.push({ fileName: metadata.fileName, text });
+      documents.push({ fileName: metadata.fileName, mediaType: metadata.mediaType, text });
     }
   }
 
   return { documents, images };
-}
-
-const analyzeInputSchema = z.object({
-  conversationId: z.uuid(),
-  attachmentIds: z.array(z.uuid()).max(20),
-});
-
-export function createAnalyzeInputTool(
-  attachments: AttachmentStore,
-  supportsInlineImages: boolean,
-) {
-  return createTool({
-    id: 'analyze-input',
-    description: 'Read this conversation’s attached documents and list its already-provided image references.',
-    inputSchema: analyzeInputSchema,
-    outputSchema: z.object({
-      documents: z.array(z.object({
-        fileName: z.string(),
-        text: z.string().max(MAX_EXTRACTED_DOCUMENT_CHARACTERS),
-      })),
-      images: z.array(z.object({ fileName: z.string(), mediaType: z.string() })),
-    }),
-    execute: async ({ conversationId, attachmentIds }) => {
-      const input = await prepareConversationInput(
-        attachments,
-        conversationId,
-        attachmentIds,
-        supportsInlineImages,
-      );
-      return {
-        documents: input.documents,
-        images: input.images.map(({ fileName, mediaType }) => ({ fileName, mediaType })),
-      };
-    },
-  });
 }

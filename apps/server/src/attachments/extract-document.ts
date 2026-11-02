@@ -1,5 +1,8 @@
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { MAX_ATTACHMENT_BYTES } from '@agent3d/shared';
+import {
+  MAX_AGENT_DOCUMENT_CHARACTERS,
+  MAX_ATTACHMENT_BYTES,
+} from '@agent3d/shared';
 
 export interface DocumentInput {
   mediaType: string;
@@ -10,7 +13,7 @@ export interface ExtractedDocument {
   text: string;
 }
 
-export const MAX_EXTRACTED_DOCUMENT_CHARACTERS = 100_000;
+export const MAX_EXTRACTED_DOCUMENT_CHARACTERS = MAX_AGENT_DOCUMENT_CHARACTERS;
 
 function validateExtractedText(text: string): ExtractedDocument {
   const normalized = text.trim();

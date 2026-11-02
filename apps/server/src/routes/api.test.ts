@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MAX_ATTACHMENT_BYTES, type AgentStructuredOutput } from '@agent3d/shared';
+import type { UIMessageChunk } from 'ai';
+import {
+  MAX_ATTACHMENT_BYTES,
+  type AgentServiceRequest,
+  type AgentStructuredOutput,
+} from '@agent3d/shared';
 import { createApp } from '../app';
 import { createArtifactRepository } from '../storage/artifacts';
 import { createAttachmentStore } from '../storage/attachments';
@@ -11,6 +16,8 @@ import { createConversationRepository } from '../storage/conversations';
 import { createDatabase } from '../storage/database';
 import { createPreferenceRepository } from '../storage/preferences';
 import { createSettingsRepository } from '../config/settings-repository';
+import { createAgentClient } from '../agent-client';
+import { CredentialBrokerUnavailableError } from '../config/credential-client';
 import type { ResolvedModelConfig } from '../config/model-resolver';
 import { DEFAULT_MODEL_SELECTION } from '../config/provider-catalog';
 
@@ -42,51 +49,86 @@ const validOutput: AgentStructuredOutput = {
 interface FakeStreamOptions {
   shouldFail?: boolean;
   waitForAbort?: boolean;
-  output?: AgentStructuredOutput;
+  includeStructuredOutput?: boolean;
+  structuredOutputCount?: number;
+  textAfterStructuredOutput?: boolean;
+  output?: unknown;
   streamedText?: string;
-  onMessages?: (messages: unknown[]) => void;
+  onRequest?: (request: AgentServiceRequest) => void;
 }
 
-function createFakeAgent({
+type FakeAgentRunner = (
+  request: AgentServiceRequest,
+  options: { signal: AbortSignal },
+) => AsyncIterable<UIMessageChunk>;
+
+function createFakeAgentRunner({
   shouldFail = false,
   waitForAbort = false,
+  includeStructuredOutput = true,
+  structuredOutputCount = 1,
+  textAfterStructuredOutput = false,
   output = validOutput,
   streamedText = 'Designing the asset.',
-  onMessages,
-}: FakeStreamOptions = {}) {
-  return {
-    async stream(messages: unknown[], options: { abortSignal?: AbortSignal }) {
-      onMessages?.(messages);
-      const fullStream = (async function* () {
-        yield { type: 'text-start', payload: { id: 'asset-brief' } };
-        yield { type: 'text-delta', payload: { id: 'asset-brief', text: streamedText } };
-        if (waitForAbort) {
-          await new Promise<void>((resolve, reject) => {
-            if (options.abortSignal?.aborted) {
-              reject(new DOMException('Request aborted.', 'AbortError'));
-              return;
-            }
-            options.abortSignal?.addEventListener('abort', () => {
-              reject(new DOMException('Request aborted.', 'AbortError'));
-            }, { once: true });
-          });
-        }
-        if (shouldFail) {
-          throw new Error('Private provider error body must not reach the client.');
-        }
-        yield { type: 'text-end', payload: { id: 'asset-brief' } };
-        yield { type: 'finish', payload: { finishReason: 'stop' } };
-      })();
-      return {
-        fullStream,
-        object: Promise.resolve(output),
+  onRequest,
+}: FakeStreamOptions = {}): FakeAgentRunner {
+  return async function* (request, { signal }) {
+    onRequest?.(request);
+    const result = (
+      typeof output === 'object'
+      && output !== null
+      && 'result' in output
+      && typeof output.result === 'object'
+      && output.result !== null
+    ) ? output.result : null;
+    if (result && 'type' in result && result.type === 'asset') {
+      yield { type: 'reasoning-start', id: 'asset-reasoning' };
+      yield { type: 'reasoning-delta', id: 'asset-reasoning', delta: 'Reviewing the design context.' };
+      yield { type: 'reasoning-end', id: 'asset-reasoning' };
+      yield {
+        type: 'tool-input-start',
+        toolCallId: 'mock-analyze',
+        toolName: 'analyze-input',
       };
-    },
+      yield {
+        type: 'tool-output-available',
+        toolCallId: 'mock-analyze',
+        output: { status: 'analyzed' },
+      };
+    }
+    yield { type: 'text-start', id: 'asset-brief' };
+    yield { type: 'text-delta', id: 'asset-brief', delta: streamedText };
+    if (waitForAbort) {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          resolve();
+        } else {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        }
+      });
+      return;
+    }
+    if (shouldFail) {
+      yield { type: 'error', errorText: 'The selected model could not complete the request.' };
+      yield { type: 'finish', finishReason: 'error' };
+      return;
+    }
+    yield { type: 'text-end', id: 'asset-brief' };
+    if (includeStructuredOutput) {
+      for (let index = 0; index < structuredOutputCount; index += 1) {
+        yield { type: 'data-structured-output', data: { object: output } };
+      }
+      yield { type: 'finish-step' };
+    }
+    if (textAfterStructuredOutput) {
+      yield { type: 'text-delta', id: 'late-text', delta: 'late response content' };
+    }
+    yield { type: 'finish', finishReason: 'stop' };
   };
 }
 
 function createFixture(
-  agentFactory = () => createFakeAgent(),
+  agentRunner: FakeAgentRunner = createFakeAgentRunner(),
   credentialReader: { get(providerId: string): Promise<string | null> } = {
     get: async () => 'test-only-key',
   },
@@ -112,7 +154,7 @@ function createFixture(
     settings,
     credentials,
     resolveModel: async () => resolvedModel,
-    createAgent: agentFactory,
+    agentClient: { stream: agentRunner },
   });
 
   return {
@@ -121,6 +163,12 @@ function createFixture(
     artifacts,
     attachments,
     preferences,
+    artifactCount() {
+      const row = database.connection
+        .prepare('SELECT COUNT(*) AS count FROM artifacts')
+        .get() as { count: number };
+      return row.count;
+    },
     close() {
       database.close();
       rmSync(directory, { recursive: true, force: true });
@@ -162,8 +210,8 @@ function chatRequest(
 
 const fixtures: Array<ReturnType<typeof createFixture>> = [];
 
-function fixture(agentFactory?: () => ReturnType<typeof createFakeAgent>) {
-  const created = createFixture(agentFactory);
+function fixture(agentRunner?: FakeAgentRunner) {
+  const created = createFixture(agentRunner);
   fixtures.push(created);
   return created;
 }
@@ -184,9 +232,50 @@ afterEach(() => {
 });
 
 describe('Hono API', () => {
+  it('returns a retryable broker-unavailable API error', async () => {
+    const { app } = fixtureWithCredentialReader({
+      get: async () => {
+        throw new CredentialBrokerUnavailableError();
+      },
+    });
+
+    const response = await authorizedRequest(app, '/api/models');
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'INTERNAL_ERROR',
+      retryable: true,
+    });
+  });
+
+  it('reports an unavailable Agent service as retryable in the chat stream', async () => {
+    const agentClient = createAgentClient({
+      baseURL: 'http://127.0.0.1:62687',
+      token: 'test-agent-token',
+      fetch: async () => {
+        throw new TypeError('connection refused');
+      },
+    });
+    const { app, conversations } = fixture(
+      (request, options) => agentClient.stream(request, options),
+    );
+    const conversation = conversations.create('Unavailable Agent service');
+
+    const response = await authorizedRequest(
+      app,
+      '/api/chat',
+      chatRequest(conversation.id),
+    );
+    const stream = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(stream).toContain('The Agent service is unavailable. Retry the request.');
+    expect(stream).not.toContain('connection refused');
+  });
+
   it('returnsConversationalReplyWithoutCreatingAnArtifactForGreeting', async () => {
     const reply = '你好！很高兴见到你。';
-    const { app, conversations } = fixture(() => createFakeAgent({
+    const { app, conversations, artifactCount } = fixture(createFakeAgentRunner({
       output: { result: { type: 'chat', reply } },
       streamedText: reply,
     }));
@@ -201,6 +290,7 @@ describe('Hono API', () => {
     expect(stream).toContain(reply);
     expect(stream).not.toContain('"type":"data-asset"');
     expect(stream).not.toContain('"type":"data-preference"');
+    expect(artifactCount()).toBe(0);
     expect(conversations.listMessages(conversation.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         role: 'assistant',
@@ -212,15 +302,16 @@ describe('Hono API', () => {
 
   it('asksBeforeCreatingAnAssetFromAnImageOnlyTurn', async () => {
     const reply = '你希望我根据这张图片创作 3D 资产吗？';
-    let modelMessages: unknown[] = [];
-    const { app, conversations } = fixture(() => createFakeAgent({
+    let agentRequest: AgentServiceRequest | undefined;
+    const { app, conversations, preferences, artifactCount } = fixture(createFakeAgentRunner({
       output: { result: { type: 'chat', reply } },
       streamedText: reply,
-      onMessages: (messages) => {
-        modelMessages = messages;
+      onRequest: (request) => {
+        agentRequest = request;
       },
     }));
     const conversation = conversations.create('Image reference');
+    preferences.upsert('visualStyle', 'faceted');
     const form = new FormData();
     form.set(
       'file',
@@ -233,7 +324,19 @@ describe('Hono API', () => {
       `/api/conversations/${conversation.id}/attachments`,
       { method: 'POST', body: form },
     );
-    const { attachment } = await uploadResponse.json() as {
+    const { attachment: image } = await uploadResponse.json() as {
+      attachment: { id: string; fileName: string; mediaType: string };
+    };
+    const documentForm = new FormData();
+    documentForm.set('file', new File(['A carved stone vessel.'], 'notes.txt', {
+      type: 'text/plain',
+    }));
+    const documentResponse = await authorizedRequest(
+      app,
+      `/api/conversations/${conversation.id}/attachments`,
+      { method: 'POST', body: documentForm },
+    );
+    const { attachment: document } = await documentResponse.json() as {
       attachment: { id: string; fileName: string; mediaType: string };
     };
     const clientTurnId = randomUUID();
@@ -246,30 +349,42 @@ describe('Hono API', () => {
         messages: [{
           id: clientTurnId,
           role: 'user',
-          parts: [{
+          parts: [image, document].map((attachment) => ({
             type: 'data-attachment',
-            id: attachment.id,
             data: {
               id: attachment.id,
               fileName: attachment.fileName,
               mediaType: attachment.mediaType,
             },
-          }],
+          })),
         }],
-        attachmentIds: [attachment.id],
+        attachmentIds: [image.id, document.id],
       }),
     });
     const stream = await response.text();
-    const inputText = JSON.stringify(modelMessages);
 
     expect(stream).toContain(reply);
     expect(stream).not.toContain('"type":"data-asset"');
-    expect(inputText).toContain('Reference image');
-    expect(inputText).not.toContain('Please create an asset from the attached images.');
+    expect(artifactCount()).toBe(0);
+    expect(agentRequest).toMatchObject({
+      model: resolvedModel,
+      messages: [{ role: 'user', content: '' }],
+      documents: [{
+        fileName: 'notes.txt',
+        mediaType: 'text/plain',
+        text: 'A carved stone vessel.',
+      }],
+      images: [{
+        fileName: 'ref.png',
+        mediaType: 'image/png',
+        dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+      }],
+      preferences: [{ key: 'visualStyle', value: 'faceted' }],
+    });
   });
 
   it('streamsAiSdkUiMessageParts', async () => {
-    const { app, conversations } = fixture();
+    const { app, conversations, artifacts, artifactCount } = fixture();
     const conversation = conversations.create('Bowl');
     const response = await authorizedRequest(
       app,
@@ -288,10 +403,14 @@ describe('Hono API', () => {
     expect(chunks.map(({ type }) => type)).toEqual(expect.arrayContaining([
       'text-start',
       'text-delta',
+      'reasoning-delta',
+      'data-activity',
       'data-asset',
       'data-preference',
       'finish',
     ]));
+    expect(stream).not.toContain('"type":"data-structured-output"');
+    expect(stream).not.toContain('"input":');
     expect(conversations.listMessages(conversation.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         role: 'assistant',
@@ -301,6 +420,49 @@ describe('Hono API', () => {
           expect.objectContaining({ type: 'preference-proposal' }),
         ]),
       }),
+    ]));
+    expect(artifactCount()).toBe(1);
+    const assetLine = stream.split('\n').find((line) => line.startsWith('data: ')
+      && line.includes('"type":"data-asset"'));
+    expect(assetLine).toBeDefined();
+    const assetChunk = JSON.parse(assetLine!.slice(6)) as {
+      data: { id: string; status: string };
+    };
+    expect(artifacts.get(assetChunk.data.id)?.status).toBe('pending');
+  });
+
+  it.each([
+    ['missing', { includeStructuredOutput: false }],
+    ['duplicate', { structuredOutputCount: 2 }],
+    ['malformed', { output: { result: { type: 'chat', reply: 'Ready.' }, apiKey: 'secret' } }],
+  ])('failsTheTurnWithoutCreatingAssetsWhenStructuredOutputIs%s', async (_case, options) => {
+    const { app, conversations, artifactCount } = fixture(createFakeAgentRunner(options));
+    const conversation = conversations.create('Invalid structured result');
+    const response = await authorizedRequest(app, '/api/chat', chatRequest(conversation.id));
+    const stream = await response.text();
+
+    expect(stream).toContain('"type":"error"');
+    expect(stream).not.toContain('"type":"data-asset"');
+    expect(stream).not.toContain('secret');
+    expect(artifactCount()).toBe(0);
+    expect(conversations.listMessages(conversation.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', status: 'error' }),
+    ]));
+  });
+
+  it('rejectsContentAfterTheFinalStructuredOutput', async () => {
+    const { app, conversations, artifactCount } = fixture(createFakeAgentRunner({
+      textAfterStructuredOutput: true,
+    }));
+    const conversation = conversations.create('Output order');
+    const response = await authorizedRequest(app, '/api/chat', chatRequest(conversation.id));
+    const stream = await response.text();
+
+    expect(stream).toContain('"type":"error"');
+    expect(stream).not.toContain('"type":"data-asset"');
+    expect(artifactCount()).toBe(0);
+    expect(conversations.listMessages(conversation.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', status: 'error' }),
     ]));
   });
 
@@ -314,7 +476,7 @@ describe('Hono API', () => {
         preferenceProposals: [],
       },
     };
-    const { app, conversations } = fixture(() => createFakeAgent({ output: invalidOutput }));
+    const { app, conversations, artifactCount } = fixture(createFakeAgentRunner({ output: invalidOutput }));
     const conversation = conversations.create('Unsafe script');
     const response = await authorizedRequest(
       app,
@@ -325,24 +487,14 @@ describe('Hono API', () => {
 
     expect(stream).toContain('"type":"error"');
     expect(stream).not.toContain('"type":"data-asset"');
+    expect(artifactCount()).toBe(0);
     expect(conversations.listMessages(conversation.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({ role: 'assistant', status: 'error' }),
     ]));
   });
 
   it('logsChatProviderFailuresWithoutExposingProviderErrorMessages', async () => {
-    const { app, conversations } = fixture(() => ({
-      async stream() {
-        return {
-          fullStream: (async function* () {
-            throw Object.assign(new Error('provider response contains a secret value'), {
-              statusCode: 401,
-            });
-          })(),
-          object: Promise.resolve(validOutput),
-        };
-      },
-    }));
+    const { app, conversations, artifactCount } = fixture(createFakeAgentRunner({ shouldFail: true }));
     const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const conversation = conversations.create('Provider failure');
 
@@ -354,14 +506,15 @@ describe('Hono API', () => {
     const stream = await response.text();
 
     expect(stream).toContain('"type":"error"');
-    expect(logError).toHaveBeenCalledWith('Chat model request failed:', {
+    expect(logError).toHaveBeenCalledWith('Chat model request failed:', expect.objectContaining({
       providerId: resolvedModel.providerId,
       modelId: resolvedModel.modelId,
       phase: 'stream',
-      errorName: 'Error',
-      statusCode: 401,
-    });
-    expect(JSON.stringify(logError.mock.calls)).not.toContain('secret value');
+    }));
+    expect(stream).not.toContain('The selected model could not complete the request.');
+    expect(JSON.stringify(logError.mock.calls)).not.toContain('The selected model could not complete the request.');
+    expect(stream).not.toContain('"type":"data-asset"');
+    expect(artifactCount()).toBe(0);
   });
 
   it('allowsTheChatPostPreflightWithTheRendererHeaders', async () => {
@@ -381,7 +534,7 @@ describe('Hono API', () => {
   });
 
   it('abortedStreamDoesNotPersistSuccess', async () => {
-    const { app, conversations } = fixture(() => createFakeAgent({ waitForAbort: true }));
+    const { app, conversations, artifactCount } = fixture(createFakeAgentRunner({ waitForAbort: true }));
     const conversation = conversations.create('Abort');
     const requestController = new AbortController();
     const response = await app.fetch(new Request('http://localhost/api/chat', {
@@ -401,27 +554,36 @@ describe('Hono API', () => {
     const assistantMessages = conversations.listMessages(conversation.id)
       .filter((message) => message.role === 'assistant');
     expect(assistantMessages.some((message) => message.status === 'complete')).toBe(false);
+    expect(assistantMessages.some((message) => message.status === 'error')).toBe(true);
+    expect(artifactCount()).toBe(0);
   });
 
   it('retryReusesClientTurnId', async () => {
     let runs = 0;
-    const { app, conversations } = fixture(() => {
+    const agentMessages: AgentServiceRequest['messages'][] = [];
+    const { app, conversations, artifactCount } = fixture(async function* (agentRequest, options) {
       runs += 1;
-      return createFakeAgent({ shouldFail: runs === 1 });
+      agentMessages.push(agentRequest.messages.map(({ role, content }) => ({ role, content })));
+      yield* createFakeAgentRunner({ shouldFail: runs === 1 })(agentRequest, options);
     });
     const conversation = conversations.create('Retry');
     const request = chatRequest(conversation.id, randomUUID());
 
     const failedResponse = await authorizedRequest(app, '/api/chat', request);
     const failedStream = await failedResponse.text();
-    expect(failedStream).not.toContain('Private provider error body must not reach the client.');
+    expect(failedStream).not.toContain('The selected model could not complete the request.');
     await (await authorizedRequest(app, '/api/chat', request)).text();
 
     const messages = conversations.listMessages(conversation.id);
     expect(messages.filter((message) => message.role === 'user')).toHaveLength(1);
     expect(messages.filter((message) => message.role === 'assistant' && message.status === 'complete'))
       .toHaveLength(1);
+    expect(artifactCount()).toBe(1);
     expect(runs).toBe(2);
+    expect(agentMessages).toEqual([
+      [{ role: 'user', content: 'Create a small ceramic bowl.' }],
+      [{ role: 'user', content: 'Create a small ceramic bowl.' }],
+    ]);
   });
 
   it('rejectsMismatchedOrOversizedUploads', async () => {

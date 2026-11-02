@@ -4,9 +4,12 @@ import { dirname, resolve } from 'node:path';
 import type { CredentialStore } from '@agent3d/shared';
 
 export interface SafeStorageAdapter {
-  isEncryptionAvailable(): boolean;
-  encryptString(value: string): Buffer;
-  decryptString(value: Buffer): string;
+  isAsyncEncryptionAvailable(): Promise<boolean>;
+  encryptStringAsync(value: string): Promise<Buffer>;
+  decryptStringAsync(encrypted: Buffer): Promise<{
+    shouldReEncrypt: boolean;
+    result: string;
+  }>;
 }
 
 export class CredentialStorageUnavailableError extends Error {
@@ -84,10 +87,15 @@ export function createSafeStorageCredentialStore(
       if (encrypted === undefined) {
         return null;
       }
-      if (!storage.isEncryptionAvailable()) {
+      if (!await storage.isAsyncEncryptionAvailable()) {
         throw new CredentialStorageUnavailableError();
       }
-      return storage.decryptString(Buffer.from(encrypted, 'base64'));
+      const encryptedBytes = Buffer.from(encrypted, 'base64');
+      const decrypted = await storage.decryptStringAsync(encryptedBytes);
+      if (decrypted.shouldReEncrypt) {
+        return (await storage.decryptStringAsync(encryptedBytes)).result;
+      }
+      return decrypted.result;
     },
 
     async set(providerId: string, secret: string): Promise<void> {
@@ -95,13 +103,13 @@ export function createSafeStorageCredentialStore(
       if (!secret.trim()) {
         throw new TypeError('Credential cannot be empty.');
       }
-      if (!storage.isEncryptionAvailable()) {
+      if (!await storage.isAsyncEncryptionAvailable()) {
         throw new CredentialStorageUnavailableError();
       }
 
       const credentials = await readCredentialFile();
       // The file contains only OS-encrypted bytes, encoded for JSON storage.
-      credentials[id] = storage.encryptString(secret).toString('base64');
+      credentials[id] = (await storage.encryptStringAsync(secret)).toString('base64');
       await saveCredentialFile(credentials);
     },
 

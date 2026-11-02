@@ -21,6 +21,12 @@ export default defineConfig({
     },
   },
   renderer: {
+    server: {
+      host: 'localhost',
+      port: 5173,
+      strictPort: true,
+      origin: 'http://localhost:5173',
+    },
     resolve: {
       alias: {
         '@renderer': resolve(appRoot, 'src/renderer/src'),

@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import {
   agentStructuredOutputSchema,
+  agentServiceRequestSchema,
   chatMessageSchema,
+  MAX_CONVERSATION_ATTACHMENTS,
+  validateBlenderScript,
+  type AgentOutput,
+  type AgentServiceRequest,
   type ChatMessage,
   type ModelConfig,
   type PersistedMessagePart,
@@ -11,11 +16,12 @@ import {
 import {
   createUIMessageStream,
   createUIMessageStreamResponse,
-  type ModelMessage,
 } from 'ai';
 import { z } from 'zod';
+import type { AgentClient } from '../agent-client';
+import { AgentServiceUnavailableError } from '../agent-client';
 import type { ResolvedModelConfig } from '../config/model-resolver';
-import { prepareConversationInput } from '../agent/tools/analyze-input';
+import { prepareConversationInput } from '../attachments/prepare-conversation-input';
 import { ProviderNotConfiguredError } from '../config/model-resolver';
 import type { AttachmentStore } from '../storage/attachments';
 import type { createArtifactRepository } from '../storage/artifacts';
@@ -23,15 +29,13 @@ import type { createConversationRepository } from '../storage/conversations';
 import { ChatTurnConflictError } from '../storage/conversations';
 import { HttpError } from '../http-errors';
 import {
-  adaptMastraChunk,
-  iterateMastraStream,
+  adaptAgentChunk,
   type ChatDataParts,
   type ChatUIMessage,
   type ChatUIMessageChunk,
-  type MastraChatAgent,
-} from '../streaming/mastra-ui-stream';
+} from '../streaming/agent-ui-stream';
 import type { createSettingsRepository } from '../config/settings-repository';
-import { parseAgentOutput } from '../agent/tools/generate-blender-script';
+import type { PreferenceRepository } from '../storage/preferences';
 
 type ConversationRepository = ReturnType<typeof createConversationRepository>;
 type ArtifactRepository = ReturnType<typeof createArtifactRepository>;
@@ -64,16 +68,17 @@ const chatRequestSchema = z.object({
   conversationId: z.uuid(),
   clientTurnId: z.uuid(),
   messages: z.array(submittedMessageSchema).min(1).max(100),
-  attachmentIds: z.array(z.uuid()).max(20),
+  attachmentIds: z.array(z.uuid()).max(MAX_CONVERSATION_ATTACHMENTS),
 }).strict();
 
 export interface ChatRouteDependencies {
   conversations: ConversationRepository;
   artifacts: ArtifactRepository;
   attachments: AttachmentStore;
+  preferences: PreferenceRepository;
   settings: SettingsRepository;
   resolveModel(selection: ModelConfig, role: 'chat'): Promise<ResolvedModelConfig>;
-  createAgent(model: ResolvedModelConfig): MastraChatAgent;
+  agentClient: AgentClient;
 }
 
 function messageText(message: ChatMessage): string {
@@ -169,49 +174,26 @@ function readSubmittedTurn(
   return { text, userParts };
 }
 
-function toModelMessages(
+function toAgentMessages(
   history: ChatMessage[],
   currentText: string,
-  documents: Array<{ fileName: string; text: string }>,
-  images: Array<{ fileName: string; dataUrl: string }>,
-): ModelMessage[] {
-  const messages: ModelMessage[] = [];
+  currentTurnUserMessageId?: string,
+): AgentServiceRequest['messages'] {
+  const messages: AgentServiceRequest['messages'] = [];
   for (const message of history) {
-    if (message.status !== 'complete') {
+    if (message.status !== 'complete' || message.id === currentTurnUserMessageId) {
       continue;
     }
     const text = messageText(message);
     if (!text) {
       continue;
     }
-    if (message.role === 'user') {
-      messages.push({ role: 'user', content: text });
-    } else {
-      messages.push({ role: 'assistant', content: text });
-    }
+    messages.push({ role: message.role, content: text });
   }
-
-  const attachmentContext = documents.map(({ fileName, text }) =>
-    `Attached document "${fileName}":\n${text}`).join('\n\n');
-  const currentPrompt = [currentText, attachmentContext]
-    .filter(Boolean)
-    .join('\n\n');
-  const content: Array<
-    | { type: 'text'; text: string }
-    | { type: 'image'; image: string }
-  > = [{
-    type: 'text',
-    text: currentPrompt || 'The user attached reference images but did not include a message. Ask what they would like to do with them.',
-  }];
-  for (const image of images) {
-    content.push({
-      type: 'text',
-      text: `Reference image: ${image.fileName}`,
-    });
-    content.push({ type: 'image', image: image.dataUrl });
-  }
-  messages.push({ role: 'user', content });
-  return messages;
+  return [
+    ...messages.slice(-39),
+    { role: 'user', content: currentText },
+  ];
 }
 
 function appendStreamPart(
@@ -265,6 +247,13 @@ function replayCompletedTurn(
 }
 
 function safeStreamError(error: unknown): { message: string; code: 'STREAM_FAILED'; retryable: true } {
+  if (error instanceof AgentServiceUnavailableError) {
+    return {
+      message: 'The Agent service is unavailable. Retry the request.',
+      code: 'STREAM_FAILED',
+      retryable: true,
+    };
+  }
   if (error instanceof ProviderNotConfiguredError || error instanceof HttpError) {
     return { message: error.message, code: 'STREAM_FAILED', retryable: true };
   }
@@ -308,9 +297,10 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     conversations,
     artifacts,
     attachments,
+    preferences,
     settings,
     resolveModel,
-    createAgent,
+    agentClient,
   } = dependencies;
   const routes = new Hono();
 
@@ -355,6 +345,18 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       body.attachmentIds,
       resolved.supportsInlineImages,
     );
+    const history = conversations.listMessages(conversation.id);
+    const agentRequest = agentServiceRequestSchema.parse({
+      model: resolved,
+      messages: toAgentMessages(
+        history,
+        input.text,
+        existing?.state === 'failed' ? existing.userMessage.id : undefined,
+      ),
+      documents: preparedInput.documents,
+      images: preparedInput.images,
+      preferences: Object.entries(preferences.list()).map(([key, value]) => ({ key, value })),
+    });
 
     const turn = conversations.beginTurn(conversation.id, body.clientTurnId, userMessage);
     if (turn.state === 'complete' && turn.assistantMessage) {
@@ -365,45 +367,55 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     }
 
     const assistantMessageId = turn.assistantMessage?.id ?? randomUUID();
-    let result: Awaited<ReturnType<MastraChatAgent['stream']>>;
-    try {
-      const agent = createAgent(resolved);
-      const history = conversations.listMessages(conversation.id)
-        .filter((message) => message.id !== turn.userMessage.id);
-      result = await agent.stream(
-        toModelMessages(history, input.text, preparedInput.documents, preparedInput.images),
-        { abortSignal: context.req.raw.signal },
-      );
-    } catch (error) {
-      logModelRequestFailure(error, resolved, 'start');
-      const safeError = safeStreamError(error);
-      conversations.failTurn(conversation.id, body.clientTurnId, {
-        id: assistantMessageId,
-        conversationId: conversation.id,
-        role: 'assistant',
-        parts: [{ type: 'text', text: safeError.message }],
-        createdAt: new Date().toISOString(),
-        status: 'error',
-      });
-      throw new HttpError(502, safeError.code, safeError.message, safeError.retryable);
-    }
-
     const stream = createUIMessageStream<ChatUIMessage>({
       execute: async ({ writer }) => {
         writer.write({ type: 'start', messageId: assistantMessageId });
         writer.write({ type: 'data-turn', data: { clientTurnId: body.clientTurnId } });
         const persistedParts: PersistedMessagePart[] = [];
         let streamedText = '';
+        let output: AgentOutput | undefined;
+        let structuredOutputCount = 0;
+        const toolNamesByCallId = new Map<string, string>();
 
         try {
-          for await (const chunk of iterateMastraStream(result.fullStream)) {
+          for await (const chunk of agentClient.stream(agentRequest, {
+            signal: context.req.raw.signal,
+          })) {
             if (context.req.raw.signal.aborted) {
               throw new DOMException('Request aborted.', 'AbortError');
             }
-            const adapted = adaptMastraChunk(chunk);
-            if (adapted.error) {
-              throw new Error('The model stream reported an error.');
+            if (chunk.type === 'data-structured-output') {
+              structuredOutputCount += 1;
+              if (structuredOutputCount > 1) {
+                throw new Error('The Agent service returned duplicate structured output.');
+              }
+              const data = chunk.data;
+              const object = (
+                typeof data === 'object'
+                && data !== null
+                && 'object' in data
+              ) ? data.object : undefined;
+              const parsedOutput = agentStructuredOutputSchema.safeParse(object);
+              if (!parsedOutput.success) {
+                throw new Error('The Agent service returned invalid structured output.');
+              }
+              output = parsedOutput.data.result;
+              continue;
             }
+            if (
+              structuredOutputCount > 0
+              && chunk.type !== 'finish-step'
+              && chunk.type !== 'finish'
+            ) {
+              throw new Error('The Agent service returned content after its final structured output.');
+            }
+            if (chunk.type === 'error') {
+              throw new Error('The Agent service could not complete the request.');
+            }
+            if (chunk.type === 'abort') {
+              throw new Error('The Agent service aborted the request.');
+            }
+            const adapted = adaptAgentChunk(chunk, toolNamesByCallId);
             if (adapted.uiChunk) {
               writer.write(adapted.uiChunk);
             }
@@ -414,12 +426,16 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
               persistedParts.push(adapted.persistedPart);
             }
           }
-
           if (context.req.raw.signal.aborted) {
             throw new DOMException('Request aborted.', 'AbortError');
           }
-          const output = agentStructuredOutputSchema.parse(await result.object).result;
-          const assetOutput = output.type === 'asset' ? parseAgentOutput(output) : null;
+          if (!output) {
+            throw new Error('The Agent service did not return a result.');
+          }
+          const assetOutput = output.type === 'asset' ? output : null;
+          if (assetOutput && !validateBlenderScript(assetOutput.script).ok) {
+            throw new Error('The Agent service returned a script that failed validation.');
+          }
           const replyText = streamedText.trim()
             || (assetOutput ? assetOutput.brief : output.type === 'chat' ? output.reply : '');
           const resultParts: PersistedMessagePart[] = [];

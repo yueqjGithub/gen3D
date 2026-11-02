@@ -19,9 +19,12 @@ describe('encrypted local credentials', () => {
   it('refusesCredentialPersistenceWhenSafeStorageUnavailable', async () => {
     directory = await mkdtemp(join(tmpdir(), 'agent3d-credentials-'));
     const store = createSafeStorageCredentialStore({
-      isEncryptionAvailable: () => false,
-      encryptString: (value) => Buffer.from(value),
-      decryptString: (value) => value.toString(),
+      isAsyncEncryptionAvailable: async () => false,
+      encryptStringAsync: async (value) => Buffer.from(value),
+      decryptStringAsync: async (value) => ({
+        shouldReEncrypt: false,
+        result: value.toString(),
+      }),
     }, directory);
 
     await expect(store.set('agnes', 'secret')).rejects.toBeInstanceOf(
@@ -32,9 +35,12 @@ describe('encrypted local credentials', () => {
   it('storesCredentialsEncryptedAndReadsBack', async () => {
     directory = await mkdtemp(join(tmpdir(), 'agent3d-credentials-'));
     const store = createSafeStorageCredentialStore({
-      isEncryptionAvailable: () => true,
-      encryptString: (value) => Buffer.from(`encrypted:${value}`),
-      decryptString: (value) => value.toString().replace(/^encrypted:/, ''),
+      isAsyncEncryptionAvailable: async () => true,
+      encryptStringAsync: async (value) => Buffer.from(`encrypted:${value}`),
+      decryptStringAsync: async (value) => ({
+        shouldReEncrypt: false,
+        result: value.toString().replace(/^encrypted:/, ''),
+      }),
     }, directory);
 
     await store.set('agnes', 'secret-for-test-only');
@@ -44,5 +50,25 @@ describe('encrypted local credentials', () => {
     await expect(store.get('agnes')).resolves.toBe('secret-for-test-only');
     await store.delete('agnes');
     await expect(store.get('agnes')).resolves.toBeNull();
+  });
+
+  it('retriesAsyncDecryptionWhenTheStorageKeyHasRotated', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'agent3d-credentials-'));
+    let decryptions = 0;
+    const store = createSafeStorageCredentialStore({
+      isAsyncEncryptionAvailable: async () => true,
+      encryptStringAsync: async (value) => Buffer.from(`encrypted:${value}`),
+      decryptStringAsync: async () => {
+        decryptions += 1;
+        return decryptions === 1
+          ? { shouldReEncrypt: true, result: 'old-key-result' }
+          : { shouldReEncrypt: false, result: 'rotated-key-result' };
+      },
+    }, directory);
+
+    await store.set('agnes', 'secret-for-test-only');
+
+    await expect(store.get('agnes')).resolves.toBe('rotated-key-result');
+    expect(decryptions).toBe(2);
   });
 });

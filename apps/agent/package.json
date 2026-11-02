@@ -1,5 +1,5 @@
 {
-  "name": "agent",
+  "name": "@agent3d/agent",
   "version": "1.0.0",
   "description": "A general-purpose Mastra agent with a local workspace, shell tools, memory, task tracking, web access, and recurring schedules.",
   "main": "index.js",

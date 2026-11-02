@@ -11,3 +11,4 @@ minimumReleaseAgeExclude:
   - '@ai-sdk/react@4.0.163'
 allowBuilds:
   '@parcel/watcher': false
+  esbuild: false

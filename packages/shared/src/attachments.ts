@@ -4,6 +4,8 @@ import { z } from 'zod';
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 /** 同一会话下所有附件的累计大小上限（20 MiB）。 */
 export const MAX_CONVERSATION_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+/** 单条消息最多可发送的附件数量。 */
+export const MAX_CONVERSATION_ATTACHMENTS = 20;
 
 /** 上传 API 接受的图片和文档 MIME 类型白名单。 */
 export const supportedMediaTypes = [
@@ -45,27 +47,29 @@ export const uploadMetadataSchema = z.object({
  * 一组会话附件的校验规则，同时限制总大小并拒绝重复附件 ID。
  * 单个文件的格式和大小由 `uploadMetadataSchema` 校验。
  */
-export const attachmentBatchSchema = z.array(uploadMetadataSchema).superRefine((attachments, context) => {
-  const totalBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
-  if (totalBytes > MAX_CONVERSATION_ATTACHMENT_BYTES) {
-    context.addIssue({
-      code: 'custom',
-      message: `Attachments exceed ${MAX_CONVERSATION_ATTACHMENT_BYTES} bytes per conversation`,
-    });
-  }
-
-  const attachmentIds = new Set<string>();
-  for (const [index, attachment] of attachments.entries()) {
-    if (attachmentIds.has(attachment.id)) {
+export const attachmentBatchSchema = z.array(uploadMetadataSchema)
+  .max(MAX_CONVERSATION_ATTACHMENTS)
+  .superRefine((attachments, context) => {
+    const totalBytes = attachments.reduce((total, attachment) => total + attachment.size, 0);
+    if (totalBytes > MAX_CONVERSATION_ATTACHMENT_BYTES) {
       context.addIssue({
         code: 'custom',
-        path: [index, 'id'],
-        message: 'Attachment IDs must be unique',
+        message: `Attachments exceed ${MAX_CONVERSATION_ATTACHMENT_BYTES} bytes per conversation`,
       });
     }
-    attachmentIds.add(attachment.id);
-  }
-});
+
+    const attachmentIds = new Set<string>();
+    for (const [index, attachment] of attachments.entries()) {
+      if (attachmentIds.has(attachment.id)) {
+        context.addIssue({
+          code: 'custom',
+          path: [index, 'id'],
+          message: 'Attachment IDs must be unique',
+        });
+      }
+      attachmentIds.add(attachment.id);
+    }
+  });
 
 /** 通过 `uploadMetadataSchema` 校验后的单个附件元数据类型。 */
 export type UploadMetadata = z.infer<typeof uploadMetadataSchema>;

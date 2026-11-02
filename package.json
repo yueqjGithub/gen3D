@@ -3,10 +3,10 @@
   "private": true,
   "packageManager": "pnpm@12.15.0",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "pnpm --filter @agent3d/desktop dev",
+    "dev": "pnpm --parallel --filter @agent3d/agent --filter @agent3d/server --filter @agent3d/desktop dev",
     "build": "pnpm -r --if-present build",
     "test": "pnpm exec node --test scripts/workspace-smoke.test.mjs && pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck"

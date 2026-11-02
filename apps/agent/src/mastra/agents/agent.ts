@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { Agent } from '@mastra/core/agent';
 import { TaskSignalProvider } from '@mastra/core/signals';
-import { askUserTool, webFetchTool, webSearchTool } from '@mastra/core/tools';
+import { askUserTool } from '@mastra/core/tools';
 import { LocalFilesystem, LocalSandbox, WORKSPACE_TOOLS, Workspace } from '@mastra/core/workspace';
 import { Memory } from '@mastra/memory';
 import { startScheduleTool, stopScheduleTool } from '../tools/schedule-tools';
@@ -74,8 +74,6 @@ For local file changes, end with a plain-text URL using ${pathToFileURL(`${works
     ask_user: askUserTool,
     start_schedule: startScheduleTool,
     stop_schedule: stopScheduleTool,
-    web_fetch: webFetchTool,
-    web_search: webSearchTool,
   },
   signals: [new TaskSignalProvider()],
 });

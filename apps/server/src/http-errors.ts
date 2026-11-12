@@ -11,13 +11,12 @@ import {
   ChatTurnConflictError,
   ChatTurnPayloadConflictError,
 } from './storage/conversations';
-import { ProviderNotConfiguredError, UnsupportedProviderError } from './config/model-resolver';
 import { UnsupportedInlineImageError } from './attachments/prepare-conversation-input';
-import { CredentialBrokerUnavailableError } from './config/credential-client';
 import { AgentServiceUnavailableError } from './agent-client';
 
 export type HttpStatus = 400 | 403 | 404 | 409 | 413 | 422 | 500 | 502;
 
+/** 统一的错误响应：HttpError 是路由主动抛出的业务错误，其余异常在 toApiErrorResponse 中按类型映射。 */
 export class HttpError extends Error {
   constructor(
     readonly status: HttpStatus,
@@ -35,6 +34,10 @@ export interface ApiErrorResponse {
   body: ApiError;
 }
 
+/**
+ * 把任意异常转成 HTTP 状态码 + 前端可识别的错误体。
+ * 未识别的异常一律返回通用的 500，不泄露内部细节。
+ */
 export function toApiErrorResponse(error: unknown): ApiErrorResponse {
   if (error instanceof HttpError) {
     return {
@@ -58,26 +61,6 @@ export function toApiErrorResponse(error: unknown): ApiErrorResponse {
     };
   }
 
-  if (error instanceof ProviderNotConfiguredError) {
-    return {
-      status: 422,
-      body: apiErrorSchema.parse({
-        code: 'PROVIDER_UNCONFIGURED',
-        message: error.message,
-        retryable: false,
-      }),
-    };
-  }
-  if (error instanceof CredentialBrokerUnavailableError) {
-    return {
-      status: 502,
-      body: apiErrorSchema.parse({
-        code: 'INTERNAL_ERROR',
-        message: 'The local credential service is unavailable. Retry the request.',
-        retryable: true,
-      }),
-    };
-  }
   if (error instanceof AgentServiceUnavailableError) {
     return {
       status: 502,
@@ -85,16 +68,6 @@ export function toApiErrorResponse(error: unknown): ApiErrorResponse {
         code: 'INTERNAL_ERROR',
         message: 'The Agent service is unavailable. Retry the request.',
         retryable: true,
-      }),
-    };
-  }
-  if (error instanceof UnsupportedProviderError) {
-    return {
-      status: 400,
-      body: apiErrorSchema.parse({
-        code: 'PROVIDER_ERROR',
-        message: 'The selected provider or model is not supported.',
-        retryable: false,
       }),
     };
   }

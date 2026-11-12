@@ -13,6 +13,7 @@ interface ArtifactRow {
   created_at: string;
 }
 
+/** 资产版本冲突：资产已不是 pending 状态，或版本号与调用方预期不一致（乐观锁）。 */
 export class ArtifactVersionConflictError extends Error {
   constructor(id: string) {
     super(`Artifact is no longer pending at the expected version: ${id}`);
@@ -27,8 +28,13 @@ export class ArtifactNotFoundError extends Error {
   }
 }
 
+/**
+ * 资产（Blender 脚本）仓库。每次编辑 version 加 1；
+ * 更新和审批都带 expectedVersion，并在事务内校验，防止覆盖别人刚做的修改（乐观锁）。
+ */
 export function createArtifactRepository(database: SqliteDatabase) {
-  const get = (id: string): AssetArtifact | null => {
+  // 数据库列名是下划线风格，这里转成共享契约里的驼峰字段，并用 zod 再校验一次
+  const get =  (id: string): AssetArtifact | null => {
     const row = database.prepare('SELECT * FROM artifacts WHERE id = ?').get(id) as
       | ArtifactRow
       | undefined;
@@ -49,6 +55,7 @@ export function createArtifactRepository(database: SqliteDatabase) {
   };
 
   return {
+    /** 新建资产：初始版本为 1，状态为 pending，等待用户审批。 */
     createPending(input: Pick<AssetArtifact, 'conversationId' | 'brief' | 'script'>): AssetArtifact {
       const artifact = assetArtifactSchema.parse({
         id: randomUUID(),
@@ -79,6 +86,7 @@ export function createArtifactRepository(database: SqliteDatabase) {
 
     get,
 
+    /** 编辑待审批资产的脚本：只允许 pending 状态，版本号 +1。immediate() 让事务一开始就加写锁。 */
     updatePending(id: string, expectedVersion: number, script: string): AssetArtifact {
       const update = database.transaction(() => {
         const current = get(id);
@@ -101,6 +109,7 @@ export function createArtifactRepository(database: SqliteDatabase) {
       return update.immediate();
     },
 
+    /** 审批（approved）或拒绝（rejected）；已处理过的资产不能再次改变状态。 */
     setStatus(
       id: string,
       expectedVersion: number,

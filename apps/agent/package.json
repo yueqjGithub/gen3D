@@ -1,11 +1,11 @@
 {
   "name": "@agent3d/agent",
   "version": "1.0.0",
-  "description": "A general-purpose Mastra agent with a local workspace, shell tools, memory, task tracking, web access, and recurring schedules.",
+  "description": "A request-scoped 3D asset agent using Mastra's native server and chat route.",
   "main": "index.js",
   "private": true,
   "scripts": {
-    "dev": "mastra dev",
+    "dev": "pnpx dotenv run -f ../../.env mastra dev",
     "build": "mastra build",
     "start": "mastra start"
   },
@@ -17,16 +17,21 @@
     "node": ">=22.13.0"
   },
   "dependencies": {
+    "@agent3d/shared": "workspace:*",
+    "@ai-sdk/anthropic": "^4.0.94",
+    "@ai-sdk/openai-compatible": "^3.0.82",
+    "@mastra/ai-sdk": "^1.11.3",
     "@mastra/core": "latest",
-    "@mastra/duckdb": "latest",
-    "@mastra/libsql": "latest",
-    "@mastra/memory": "latest",
-    "@mastra/observability": "latest",
+    "@mastra/libsql": "^1.28.0",
+    "@mastra/memory": "^1.40.0",
+    "@mastra/observability": "^1.23.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "latest",
+    "dotenv": "^18.0.9",
     "mastra": "latest",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "5.0.5"
   }
 }

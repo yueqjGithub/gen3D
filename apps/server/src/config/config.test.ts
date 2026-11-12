@@ -1,156 +1,59 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createDatabase } from '../storage/database';
-import {
-  DEFAULT_MODEL_SELECTION,
-  providerCatalog,
-} from './provider-catalog';
-import {
-  ProviderNotConfiguredError,
-  UnsupportedProviderError,
-  resolveModel,
-} from './model-resolver';
+import { createTestDirectory } from '../test-directory';
+import { DEFAULT_MODEL_SELECTION, providerCatalog } from './provider-catalog';
 import { createSettingsRepository } from './settings-repository';
-import { readServerEnvironment } from './env';
+
+const fixtures: Array<{
+  directory: string;
+  database: Awaited<ReturnType<typeof createDatabase>>;
+}> = [];
+
+async function createSettings() {
+  const directory = createTestDirectory('settings-');
+  const database = await createDatabase(join(directory, 'app.sqlite'));
+  fixtures.push({ directory, database });
+  return {
+    database,
+    settings: createSettingsRepository(database.connection),
+  };
+}
+
+afterEach(async () => {
+  for (const { database } of fixtures.splice(0)) {
+    database.close();
+  }
+});
 
 describe('model configuration', () => {
-  it('readsExplicitMockModeAndEmptyDevelopmentCredentials', () => {
-    expect(readServerEnvironment({
-      AGENT3D_MOCK_MODE: 'true',
-      AGENT3D_SERVER_URL: 'http://127.0.0.1:62686',
-      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
-      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
-      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687/',
-      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
-      AGENT3D_CHAT_API_KEY: '',
-      AGENT3D_IMAGE_API_KEY: '',
-    })).toEqual({
-      mockMode: true,
-      chatApiKey: null,
-      imageApiKey: null,
-      serverUrl: 'http://127.0.0.1:62686',
-      serverPort: 62686,
-      serverToken: 'test-only-server-token',
-      rendererOrigin: 'http://localhost:5173',
-      agentServiceUrl: 'http://127.0.0.1:62687',
-      agentServiceToken: 'test-only-agent-token',
-      credentialBrokerPort: 62588,
-      credentialBrokerToken: 'test-only-broker-token',
-    });
-
-    expect(() => readServerEnvironment({ AGENT3D_MOCK_MODE: 'sometimes' })).toThrow();
-  });
-
-  it('readsAndValidatesCredentialBrokerSettings', () => {
-    expect(readServerEnvironment({
-      AGENT3D_SERVER_URL: 'http://127.0.0.1:62686',
-      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
-      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
-      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687',
-      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
-      AGENT3D_CREDENTIAL_BROKER_PORT: '62589',
-    })).toMatchObject({
-      credentialBrokerPort: 62589,
-      credentialBrokerToken: 'test-only-broker-token',
-      serverPort: 62686,
-    });
-    expect(() => readServerEnvironment({
-      AGENT3D_SERVER_URL: 'http://127.0.0.1:62686',
-      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
-      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
-      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687',
-      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
-      AGENT3D_CREDENTIAL_BROKER_PORT: '70000',
-    })).toThrow('AGENT3D_CREDENTIAL_BROKER_PORT');
-    expect(() => readServerEnvironment({
-      AGENT3D_SERVER_URL: 'http://127.0.0.1:70000',
-      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
-      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687',
-      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
-      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
-    })).toThrow('AGENT3D_SERVER_URL');
-  });
-
-  it('requiresALoopbackAgentUrlAndInternalToken', () => {
-    const validEnvironment = {
-      AGENT3D_SERVER_URL: 'http://127.0.0.1:62686',
-      AGENT3D_SERVER_TOKEN: 'test-only-server-token',
-      AGENT3D_CREDENTIAL_BROKER_TOKEN: 'test-only-broker-token',
-      AGENT3D_AGENT_URL: 'http://127.0.0.1:62687',
-      AGENT3D_AGENT_TOKEN: 'test-only-agent-token',
-    };
-
-    expect(() => readServerEnvironment({
-      ...validEnvironment,
-      AGENT3D_AGENT_URL: undefined,
-    })).toThrow('AGENT3D_AGENT_URL');
-    expect(() => readServerEnvironment({
-      ...validEnvironment,
-      AGENT3D_AGENT_URL: 'http://192.0.2.10:62687',
-    })).toThrow('127.0.0.1');
-    expect(() => readServerEnvironment({
-      ...validEnvironment,
-      AGENT3D_AGENT_TOKEN: '',
-    })).toThrow('AGENT3D_AGENT_TOKEN');
-    expect(() => readServerEnvironment({
-      ...validEnvironment,
-      AGENT3D_SERVER_TOKEN: '',
-    })).toThrow('AGENT3D_SERVER_TOKEN');
-    expect(() => readServerEnvironment({
-      ...validEnvironment,
-      AGENT3D_CREDENTIAL_BROKER_TOKEN: '',
-    })).toThrow('AGENT3D_CREDENTIAL_BROKER_TOKEN');
-  });
-
   it('usesAgnesDefaultsForIndependentModels', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'agent3d-settings-'));
-    const database = createDatabase(join(directory, 'app.sqlite'));
-    const settings = createSettingsRepository(database.connection, { get: async () => null });
+    const { settings } = await createSettings();
+    const selection = settings.getModelSelection();
 
-    try {
-      const selection = await settings.getModelSelection();
-
-      expect(selection.chat).toMatchObject({
-        providerId: 'agnes',
-        modelId: 'agnes/agnes-3.0-flash',
-        baseURL: 'https://apihub.agnes-ai.com/v1',
-        apiKeyConfigured: false,
-      });
-      expect(selection.image).toMatchObject({
-        providerId: 'agnes',
-        modelId: 'agnes-image-2.5-flash',
-        apiKeyConfigured: false,
-      });
-      expect(selection.chat.modelId).not.toBe(selection.image.modelId);
-      expect(DEFAULT_MODEL_SELECTION.chat.modelId).toBe('agnes/agnes-3.0-flash');
-      expect(providerCatalog.anthropic.models.chat).toContain('anthropic/claude-sonnet-4-5');
-    } finally {
-      database.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
+    expect(selection.chat).toEqual({
+      providerId: 'agnes',
+      modelId: 'agnes/agnes-3.0-flash',
+      baseURL: 'https://apihub.agnes-ai.com/v1',
+    });
+    expect(selection.image).toEqual({
+      providerId: 'agnes',
+      modelId: 'agnes-image-2.5-flash',
+      baseURL: 'https://apihub.agnes-ai.com/v1',
+    });
+    expect(selection.chat.modelId).not.toBe(selection.image.modelId);
+    expect(providerCatalog.anthropic.models.chat).toContain('anthropic/claude-sonnet-4-5');
   });
 
   it('readsModelSelectionAfterItHasBeenSaved', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'agent3d-settings-'));
-    const database = createDatabase(join(directory, 'app.sqlite'));
-    const settings = createSettingsRepository(database.connection, { get: async () => null });
+    const { settings } = await createSettings();
+    settings.saveModelSelection(DEFAULT_MODEL_SELECTION);
 
-    try {
-      settings.saveModelSelection(DEFAULT_MODEL_SELECTION);
-
-      await expect(settings.getModelSelection()).resolves.toEqual(DEFAULT_MODEL_SELECTION);
-    } finally {
-      database.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
+    expect(settings.getModelSelection()).toEqual(DEFAULT_MODEL_SELECTION);
   });
 
   it('migratesPreviouslySavedAgnesChatModelToTheCurrentDefault', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'agent3d-settings-'));
-    const database = createDatabase(join(directory, 'app.sqlite'));
-    const settings = createSettingsRepository(database.connection, { get: async () => null });
+    const { database, settings } = await createSettings();
     const oldSelection = {
       chat: {
         providerId: 'agnes',
@@ -163,65 +66,18 @@ describe('model configuration', () => {
         baseURL: 'https://apihub.agnes-ai.com/v1',
       },
     };
+    database.connection.prepare(`
+      INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+    `).run('model-selection', JSON.stringify(oldSelection), new Date().toISOString());
 
-    try {
-      database.connection.prepare(`
-        INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-      `).run('model-selection', JSON.stringify(oldSelection), new Date().toISOString());
+    const selection = settings.getModelSelection();
+    const stored = JSON.parse(
+      (database.connection.prepare(
+        'SELECT value FROM settings WHERE key = ?',
+      ).get('model-selection') as { value: string }).value,
+    ) as typeof oldSelection;
 
-      const selection = await settings.getModelSelection();
-      const stored = JSON.parse(
-        (database.connection.prepare(
-          'SELECT value FROM settings WHERE key = ?',
-        ).get('model-selection') as { value: string }).value,
-      ) as typeof oldSelection;
-
-      expect(selection.chat.modelId).toBe('agnes/agnes-3.0-flash');
-      expect(stored.chat.modelId).toBe('agnes/agnes-3.0-flash');
-    } finally {
-      database.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('neverReturnsCredentialValues', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'agent3d-settings-'));
-    const database = createDatabase(join(directory, 'app.sqlite'));
-    const settings = createSettingsRepository(database.connection, {
-      get: async () => 'secret-for-test-only',
-    });
-
-    try {
-      const selection = await settings.getModelSelection();
-
-      expect(selection.chat.apiKeyConfigured).toBe(true);
-      expect(JSON.stringify(selection)).not.toContain('secret-for-test-only');
-    } finally {
-      database.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('rejectsUnknownProviders', async () => {
-    await expect(resolveModel({
-      providerId: 'unknown',
-      modelId: 'unknown/model',
-      baseURL: 'https://example.com/v1',
-      apiKeyConfigured: true,
-    }, 'chat', { get: async () => 'secret' })).rejects.toBeInstanceOf(UnsupportedProviderError);
-  });
-
-  it('reportsMissingCredentials', async () => {
-    await expect(resolveModel(DEFAULT_MODEL_SELECTION.chat, 'chat', {
-      get: async () => null,
-    })).rejects.toBeInstanceOf(ProviderNotConfiguredError);
-  });
-
-  it('disablesInlineImagesForProvidersThatOnlyDocumentPublicImageUrls', async () => {
-    const resolved = await resolveModel(DEFAULT_MODEL_SELECTION.chat, 'chat', {
-      get: async () => 'test-only-key',
-    });
-
-    expect(resolved.supportsInlineImages).toBe(false);
+    expect(selection.chat.modelId).toBe('agnes/agnes-3.0-flash');
+    expect(stored.chat.modelId).toBe('agnes/agnes-3.0-flash');
   });
 });

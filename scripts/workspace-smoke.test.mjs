@@ -6,15 +6,18 @@ import test from 'node:test';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 
-test('root package uses pnpm 12 and defines required commands', () => {
-  const packagePath = join(root, 'package.json');
-  assert.ok(existsSync(packagePath), 'root package.json must exist');
+function read(relativePath) {
+  return readFileSync(join(root, relativePath), 'utf8');
+}
 
-  const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
+function readPackage(relativePath) {
+  return JSON.parse(read(relativePath));
+}
+
+test('root package uses pnpm 12 and preserves the workspace commands', () => {
+  const packageJson = readPackage('package.json');
   assert.match(packageJson.packageManager, /^pnpm@12\./);
-  for (const command of ['dev', 'build', 'test', 'typecheck']) {
-    assert.ok(packageJson.scripts?.[command], `missing root script: ${command}`);
-  }
+  assert.deepEqual(Object.keys(packageJson.scripts).sort(), ['build', 'dev', 'test', 'typecheck']);
   assert.equal(
     packageJson.scripts.dev,
     'pnpm --parallel --filter @agent3d/agent --filter @agent3d/server --filter @agent3d/desktop dev',
@@ -22,83 +25,106 @@ test('root package uses pnpm 12 and defines required commands', () => {
   assert.match(packageJson.engines?.node ?? '', />=22\.13\.0/);
 });
 
-test('Mastra Agent has an independent workspace and project commands', () => {
-  const packagePath = join(root, 'apps', 'agent', 'package.json');
-  assert.ok(existsSync(packagePath), 'Agent package.json must exist');
+test('Mastra owns the fixed Agent port and reads provider keys from its local environment', () => {
+  const packageJson = readPackage('apps/agent/package.json');
+  const environmentExample = read('apps/agent/.env.example');
+  const entrypoint = read('apps/agent/src/mastra/index.ts');
+  const agent = read('apps/agent/src/mastra/agents/agent.ts');
 
-  const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
   assert.equal(packageJson.name, '@agent3d/agent');
-  assert.ok(existsSync(join(root, 'apps', 'agent', 'src', 'mastra', 'index.ts')));
-  for (const command of ['dev', 'test', 'typecheck', 'build']) {
-    assert.ok(packageJson.scripts?.[command], `missing Agent script: ${command}`);
-  }
-  assert.match(packageJson.scripts.dev, /--env-file-if-exists=\.\.\/\.\.\/\.env/);
-  assert.match(packageJson.scripts.dev, /mastra.*dev/);
-  assert.ok(packageJson.dependencies?.['@mastra/ai-sdk']);
-  assert.ok(packageJson.dependencies?.['@mastra/core']);
-  assert.ok(packageJson.devDependencies?.mastra, 'Mastra CLI must be a development dependency');
+  assert.deepEqual(Object.keys(packageJson.scripts).sort(), ['build', 'dev', 'start']);
+  assert.equal(packageJson.scripts.dev, 'pnpx dotenv run -f ../../.env mastra dev');
+  assert.equal(packageJson.devDependencies?.hono, undefined);
+  assert.deepEqual(environmentExample.match(/^[A-Z_]+=.*$/gm), [
+    'AGNES_API_KEY=',
+    'OPENAI_API_KEY=',
+    'ANTHROPIC_API_KEY=',
+  ]);
+  assert.match(entrypoint, /host:\s*'127\.0\.0\.1'/);
+  assert.match(entrypoint, /port:\s*62687/);
+  assert.match(entrypoint, /path:\s*'\/chat\/:agentId'/);
+  assert.match(entrypoint, /version:\s*'v7'/);
+  assert.match(entrypoint, /sendReasoning:\s*true/);
+  assert.match(entrypoint, /context\.get\('requestContext'\)\.set\('agent3d', agent3d\)/);
+  assert.match(agent, /instructions:\s*`/);
+  assert.match(agent, /tools:\s*\(\{\s*requestContext\s*\}\)\s*=>\s*\{/);
+  assert.match(agent, /process\.env\.AGNES_API_KEY/);
 });
 
-test('Hono server has standalone root-env development and Node ESM build commands', () => {
-  const packageJson = JSON.parse(readFileSync(join(root, 'apps', 'server', 'package.json'), 'utf8'));
+test('Hono binds the fixed local address and calls the native Agent endpoint', () => {
+  const packageJson = readPackage('apps/server/package.json');
+  const server = read('apps/server/src/index.ts');
+  const originMiddleware = read('apps/server/src/middleware/local-origin.ts');
 
   for (const command of ['dev', 'test', 'typecheck', 'build']) {
     assert.ok(packageJson.scripts?.[command], `missing server script: ${command}`);
   }
-  assert.match(packageJson.scripts.dev, /--env-file-if-exists=\.\.\/\.\.\/\.env/);
-  assert.match(packageJson.scripts.dev, /tsx/);
-  assert.match(packageJson.scripts.build, /esbuild/);
-  assert.match(packageJson.scripts.build, /--format=esm/);
+  assert.match(server, /hostname:\s*'127\.0\.0\.1'/);
+  assert.match(server, /port:\s*62586/);
+  assert.match(read('apps/server/src/agent-client.ts'), /http:\/\/127\.0\.0\.1:62687\/chat\/asset-creation-agent/);
+  assert.match(originMiddleware, /http:\/\/localhost:5173/);
+  assert.match(originMiddleware, /'null'/);
+  assert.doesNotMatch(server, /process\.env\.(?:AGENT3D_SERVER|AGENT3D_AGENT)_/);
+  assert.equal(existsSync(join(root, 'apps/server/.env.example')), false);
 });
 
-test('Electron main does not construct Hono or own backend storage', () => {
-  const desktopPackage = JSON.parse(readFileSync(join(root, 'apps', 'desktop', 'package.json'), 'utf8'));
-  const mainSource = readFileSync(join(root, 'apps', 'desktop', 'src', 'main', 'index.ts'), 'utf8');
+test('Electron only creates the window and renderer calls Hono directly', () => {
+  const packageJson = readPackage('apps/desktop/package.json');
+  const main = read('apps/desktop/src/main/index.ts');
+  const client = read('apps/desktop/src/renderer/src/api/client.ts');
+  const rendererConfig = read('apps/desktop/electron.vite.config.ts');
 
-  assert.doesNotMatch(
-    mainSource,
-    /import.*\b(?:createApp|createDatabase|listenLocalApi|createAgentClient)\b|createApp\s*\(/,
-  );
-  assert.equal(desktopPackage.dependencies?.['better-sqlite3'], undefined);
-  assert.equal(desktopPackage.dependencies?.['pdfjs-dist'], undefined);
-  assert.ok(desktopPackage.dependencies?.hono, 'Electron still hosts the safeStorage credential broker');
+  assert.equal(packageJson.main, 'out/main/index.js');
+  assert.equal(packageJson.dependencies?.hono, undefined);
+  assert.equal(packageJson.dependencies?.['@hono/node-server'], undefined);
+  assert.match(main, /new BrowserWindow/);
+  assert.match(main, /accelerator:\s*'F12'/);
+  assert.doesNotMatch(main, /safeStorage|credential|token|createApp|createDatabase/i);
+  assert.match(client, /http:\/\/127\.0\.0\.1:62586/);
+  assert.doesNotMatch(client, /token|authHeaders|saveCredential|removeCredential/i);
+  assert.match(rendererConfig, /port:\s*5173/);
+  assert.match(rendererConfig, /strictPort:\s*true/);
+  assert.equal(existsSync(join(root, 'apps/desktop/src/preload/index.ts')), false);
 });
 
-test('root environment example documents stable loopback service configuration', () => {
-  const example = readFileSync(join(root, '.env.example'), 'utf8');
-
-  for (const setting of [
-    'AGENT3D_SERVER_URL=http://127.0.0.1:62586',
-    'AGENT3D_SERVER_TOKEN=',
-    'AGENT3D_RENDERER_ORIGIN=http://localhost:5173',
-    'AGENT3D_AGENT_URL=http://127.0.0.1:62687',
-    'AGENT3D_AGENT_TOKEN=',
-    'AGENT3D_CREDENTIAL_BROKER_PORT=62588',
-    'AGENT3D_CREDENTIAL_BROKER_TOKEN=',
-    'AGENT3D_MOCK_MODE=true',
-    'AGENT3D_DATA_DIR=',
+test('desktop components use the shared local API directly without an injected client factory', () => {
+  const client = read('apps/desktop/src/renderer/src/api/client.ts');
+  assert.match(client, /export const api\s*=/);
+  assert.doesNotMatch(client, /createApiClient/);
+  for (const file of [
+    'App.tsx',
+    'features/chat/ChatView.tsx',
+    'features/assets/AssetPanel.tsx',
+    'features/settings/ModelSettings.tsx',
+    'features/settings/PreferenceSettings.tsx',
   ]) {
-    assert.ok(example.includes(setting), `missing environment example: ${setting}`);
+    const component = read(`apps/desktop/src/renderer/src/${file}`);
+    assert.match(component, /import \{ api \} from/);
+    assert.doesNotMatch(component, /api:\s*ApiClient|api=\{api\}/);
   }
 });
 
-test('pnpm workspace includes app and package directories', () => {
-  const workspacePath = join(root, 'pnpm-workspace.yaml');
-  assert.ok(existsSync(workspacePath), 'pnpm-workspace.yaml must exist');
+test('Agent environment example documents the shared data directory and credentials', () => {
+  const agentEnvironment = read('apps/agent/.env.example');
+  const documented = read('README.md');
 
-  const workspace = readFileSync(workspacePath, 'utf8');
+  assert.equal(existsSync(join(root, '.env.example')), false);
+  assert.deepEqual(agentEnvironment.match(/^[A-Z0-9_]+=.*$/gm), [
+    'AGENT3D_DATA_DIR=',
+    'AGNES_API_KEY=',
+    'OPENAI_API_KEY=',
+    'ANTHROPIC_API_KEY=',
+  ]);
+  assert.match(documented, /AGNES_API_KEY/);
+  assert.match(documented, /apps\/agent\/\.env/);
+  for (const port of ['5173', '62586', '62687']) {
+    assert.ok(documented.includes(port), `README is missing fixed port ${port}`);
+  }
+});
+
+test('workspace keeps the shared packages and renderer entrypoint', () => {
+  const workspace = read('pnpm-workspace.yaml');
   assert.match(workspace, /apps\/\*/);
   assert.match(workspace, /packages\/\*/);
-});
-
-test('Electron renderer has a React entrypoint', () => {
-  assert.ok(
-    existsSync(join(root, 'apps', 'desktop', 'src', 'renderer', 'src', 'main.tsx')),
-    'React renderer entrypoint must exist',
-  );
-});
-
-test('Electron package points at the built main entrypoint', () => {
-  const packageJson = JSON.parse(readFileSync(join(root, 'apps', 'desktop', 'package.json'), 'utf8'));
-  assert.equal(packageJson.main, 'out/main/index.js');
+  assert.ok(existsSync(join(root, 'apps/desktop/src/renderer/src/main.tsx')));
 });

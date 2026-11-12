@@ -5,7 +5,7 @@
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "node --env-file-if-exists=../../.env ./node_modules/electron-vite/bin/electron-vite.js dev",
+    "dev": "pnpm dotenv run -f ../../.env electron-vite dev",
     "build": "electron-vite build",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit -p tsconfig.json"
@@ -13,9 +13,8 @@
   "dependencies": {
     "@agent3d/shared": "workspace:*",
     "@ai-sdk/react": "4.0.163",
-    "@hono/node-server": "1.19.0",
     "ai": "7.0.159",
-    "hono": "4.13.14",
+    "electron-debug": "^5.0.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "zod": "4.6.7"
@@ -27,6 +26,7 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
+    "dotenv": "^18.0.9",
     "electron": "45.2.1",
     "electron-vite": "6.0.0",
     "jsdom": "30.1.3",

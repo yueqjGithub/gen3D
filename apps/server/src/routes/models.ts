@@ -1,15 +1,11 @@
 import { Hono } from 'hono';
-import {
-  modelSelectionSchema,
-  type CredentialStore,
-  type ModelConfig,
-  type ModelSelection,
-} from '@agent3d/shared';
+import { modelSelectionSchema } from '@agent3d/shared';
 import { z } from 'zod';
 import { providerCatalog, providerOptions } from '../config/provider-catalog';
 import type { createSettingsRepository } from '../config/settings-repository';
 import type { PreferenceRepository } from '../storage/preferences';
 import { HttpError } from '../http-errors';
+import { getCookie } from 'hono/cookie';
 
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 
@@ -18,79 +14,52 @@ const preferenceRequestSchema = z.object({
   value: z.string().trim().min(1).max(500),
 }).strict();
 
-const credentialRequestSchema = z.object({
-  apiKey: z.string().trim().min(1).max(4096),
-}).strict();
 const deletePreferenceRequestSchema = z.object({
   key: z.string().trim().min(1).max(80),
 }).strict();
 
-function assertProviderSelections(selection: ModelSelection): void {
-  for (const role of ['chat', 'image'] as const) {
-    const config: ModelConfig = selection[role];
-    const provider = Object.values(providerCatalog).find(({ id }) => id === config.providerId);
-    const supportedModels: readonly string[] = provider?.models[role] ?? [];
-    if (!provider || !supportedModels.includes(config.modelId)) {
-      throw new HttpError(400, 'VALIDATION_FAILED', `The selected ${role} provider or model is unsupported.`);
-    }
-  }
-}
-
 export interface SettingsRouteDependencies {
   settings: SettingsRepository;
-  credentials: CredentialStore;
   preferences: PreferenceRepository;
 }
 
-export function createModelSettingsRoutes({
-  settings,
-  credentials,
-  preferences,
-}: SettingsRouteDependencies) {
+/** 模型设置与用户偏好两组接口：都很小，所以放在同一个路由文件里。 */
+export function createModelSettingsRoutes({ settings, preferences }: SettingsRouteDependencies) {
   const routes = new Hono();
 
-  routes.get('/models', async (context) => context.json({
+  // 返回可选的提供商列表和当前选择，设置页面据此渲染
+  routes.get('/models', (context) => context.json({
     providers: providerOptions,
-    selection: await settings.getModelSelection(),
+    selection: settings.getModelSelection(),
   }));
 
+  // 保存模型选择：先用 zod 校验结构，再逐个角色（chat / image）确认模型存在于目录中
   routes.patch('/models', async (context) => {
     const selection = modelSelectionSchema.parse(await context.req.json());
-    assertProviderSelections(selection);
+    for (const role of ['chat', 'image'] as const) {
+      const config = selection[role];
+      const provider = Object.values(providerCatalog).find(({ id }) => id === config.providerId);
+      const supportedModels: readonly string[] = provider?.models[role] ?? [];
+      if (!supportedModels.includes(config.modelId)) {
+        throw new HttpError(400, 'PROVIDER_ERROR', `The selected ${role} provider or model is unsupported.`);
+      }
+    }
     settings.saveModelSelection(selection);
-    return context.json({ selection: await settings.getModelSelection() });
+    return context.json({ selection: settings.getModelSelection() });
   });
 
-  routes.put('/models/credentials/:providerId', async (context) => {
-    const providerId = context.req.param('providerId');
-    if (!Object.values(providerCatalog).some(({ id }) => id === providerId)) {
-      throw new HttpError(404, 'NOT_FOUND', 'The requested model provider does not exist.');
-    }
-    const body = credentialRequestSchema.parse(await context.req.json());
-    await credentials.set(providerId, body.apiKey);
-    return context.json({ providerId, configured: true });
-  });
-
-  routes.delete('/models/credentials/:providerId', async (context) => {
-    const providerId = context.req.param('providerId');
-    if (!Object.values(providerCatalog).some(({ id }) => id === providerId)) {
-      throw new HttpError(404, 'NOT_FOUND', 'The requested model provider does not exist.');
-    }
-    await credentials.delete(providerId);
-    return context.body(null, 204);
-  });
-
-  routes.get('/preferences', (context) => context.json({ preferences: preferences.list() }));
+  // 用户偏好：Agent 会读取它们作为上下文；新增/修改由用户在界面确认后才会调用这里
+  routes.get('/preferences', (context) => context.json({ preferences: preferences.list(getCookie(context, 'username')!) }));
 
   routes.put('/preferences', async (context) => {
     const body = preferenceRequestSchema.parse(await context.req.json());
-    preferences.upsert(body.key, body.value);
-    return context.json({ preferences: preferences.list() });
+    preferences.upsert(body.key, body.value, getCookie(context, 'username')!);
+    return context.json({ preferences: preferences.list(getCookie(context, 'username')!) });
   });
 
   routes.delete('/preferences', async (context) => {
     const { key } = deletePreferenceRequestSchema.parse(await context.req.json());
-    if (!preferences.delete(key)) {
+    if (!preferences.delete(key, getCookie(context, 'username')!)) {
       throw new HttpError(404, 'NOT_FOUND', 'The requested preference does not exist.');
     }
     return context.body(null, 204);

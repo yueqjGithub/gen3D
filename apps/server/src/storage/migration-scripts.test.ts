@@ -16,6 +16,6 @@ describe('migration scripts in the Node development runtime', () => {
       encoding: 'utf8',
     });
 
-    expect(output.trim()).toBe('3');
+    expect(output.trim()).toBe('5');
   });
 });

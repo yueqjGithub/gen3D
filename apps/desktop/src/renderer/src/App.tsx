@@ -1,32 +1,21 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AssetArtifact, Conversation } from '@agent3d/shared';
-import { createApiClient, type ApiClient } from './api/client';
+import { api } from './api/client';
 import type { ChatUIMessage } from './api/types';
 import { AssetPanel } from './features/assets/AssetPanel';
 import { ChatView } from './features/chat/ChatView';
 import { ConversationSidebar } from './features/conversations/ConversationSidebar';
 import { ModelSettings } from './features/settings/ModelSettings';
+import { ModelProvider } from './features/settings/ModelContext';
 import { PreferenceSettings } from './features/settings/PreferenceSettings';
+import { LoginForm } from './features/login/LoginForm';
+import { LocalApiError } from './api/client';
 
-export interface AppProps {
-  api?: ApiClient;
-}
-
-export default function App({ api: providedApi }: AppProps) {
-  const apiState = useMemo(() => {
-    if (providedApi) {
-      return { api: providedApi, error: null };
-    }
-    try {
-      return { api: createApiClient(), error: null };
-    } catch (error) {
-      return {
-        api: null,
-        error: error instanceof Error ? error.message : '本地 API 不可用。',
-      };
-    }
-  }, [providedApi]);
-  const api = apiState.api;
+/** 工作台的顶层状态：当前会话、历史消息、当前资产和设置面板。 */
+export default function App() {
+  const [username, setUsername] = useState<string | null>(null);
+  const [checkingLogin, setCheckingLogin] = useState(true);
+  const [changingPassword, setChangingPassword] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatUIMessage[]>([]);
@@ -35,13 +24,27 @@ export default function App({ api: providedApi }: AppProps) {
   const [settingsTab, setSettingsTab] = useState<'models' | 'preferences'>('models');
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
-  const [error, setError] = useState<string | null>(apiState.error);
+  const [error, setError] = useState<string | null>(null);
 
+  const initRef = useRef(false);
+
+  // 启动时先检查 Cookie；网络错误与未登录分开显示。
   useEffect(() => {
-    if (!api) {
-      setLoadingConversations(false);
-      return;
+    if (!initRef.current) {
+      initRef.current = true;
+      void api.currentUser().then((user) => {
+        setUsername(user);
+      }).catch((loginError: unknown) => {
+        if (!(loginError instanceof LocalApiError && loginError.status === 401)) {
+          setError(loginError instanceof Error ? loginError.message : '无法连接服务。');
+        }
+      }).finally(() => { setCheckingLogin(false); });
     }
+  }, []);
+
+  // 登录后再读取会话列表，避免在用户名还未确定时发起请求。
+  useEffect(() => {
+    if (!username) return;
     let active = true;
     void api.listConversations()
       .then((loaded) => {
@@ -64,12 +67,13 @@ export default function App({ api: providedApi }: AppProps) {
     return () => {
       active = false;
     };
-  }, [api]);
+  }, [username]);
 
   const activeConversation = conversations.find(({ id }) => id === activeConversationId) ?? null;
 
+  // 切换会话时重新加载历史消息，并从历史中找到最近生成的资产。
   useEffect(() => {
-    if (!api || !activeConversation) {
+    if (!activeConversation) {
       setMessages([]);
       setArtifact(null);
       setLoadingMessages(false);
@@ -103,12 +107,9 @@ export default function App({ api: providedApi }: AppProps) {
     return () => {
       active = false;
     };
-  }, [api, activeConversation?.id]);
+  }, [activeConversation?.id]);
 
   async function createConversation() {
-    if (!api) {
-      return;
-    }
     setError(null);
     try {
       const created = await api.createConversation();
@@ -120,18 +121,12 @@ export default function App({ api: providedApi }: AppProps) {
   }
 
   async function renameConversation(id: string, title: string) {
-    if (!api) {
-      return;
-    }
     const updated = await api.renameConversation(id, title);
     setConversations((current) => current.map((conversation) =>
       conversation.id === id ? updated : conversation));
   }
 
   async function deleteConversation(id: string) {
-    if (!api) {
-      return;
-    }
     await api.deleteConversation(id);
     const remaining = conversations.filter((conversation) => conversation.id !== id);
     setConversations(remaining);
@@ -141,9 +136,6 @@ export default function App({ api: providedApi }: AppProps) {
   }
 
   async function openAsset(artifactId: string) {
-    if (!api) {
-      return;
-    }
     try {
       const details = await api.getArtifact(artifactId);
       setArtifact(details.artifact);
@@ -153,17 +145,16 @@ export default function App({ api: providedApi }: AppProps) {
     }
   }
 
-  if (!api) {
-    return (
-      <main className="app-error">
-        <span className="app-error__eyebrow">本地服务未连接</span>
-        <h1>无法连接到创作工作台</h1>
-        <p role="alert">{error ?? '请重启桌面应用后重试。'}</p>
-      </main>
-    );
-  }
+  if (checkingLogin) return <main className="login-screen">正在检查登录状态…</main>;
+  if (!username) return (
+    <main className="login-screen">
+      {error && <p role="alert">{error}</p>}
+      <LoginForm onLogin={(user) => { setError(null); setUsername(user); }} />
+    </main>
+  );
 
   return (
+    <ModelProvider>
     <main className="app-shell">
       <ConversationSidebar
         conversations={conversations}
@@ -177,6 +168,11 @@ export default function App({ api: providedApi }: AppProps) {
       <section className="workspace">
         <div className="workspace__toolbar">
           <span>从灵感到可审阅的 3D 资产</span>
+          <button type="button" className="account-button" onClick={() => setChangingPassword(true)}>
+            <span className="account-button__username">{username}</span>
+            <span aria-hidden="true">·</span>
+            <span>修改密码</span>
+          </button>
           <button type="button" className="settings-button" onClick={() => setSettingsOpen(true)}>
             设置
           </button>
@@ -193,17 +189,16 @@ export default function App({ api: providedApi }: AppProps) {
               ) : (
                 <ChatView
                   key={activeConversation.id}
-                  api={api}
                   conversation={activeConversation}
                   initialMessages={messages}
                   onArtifactChange={setArtifact}
                   onOpenAsset={(artifactId) => void openAsset(artifactId)}
+                  onOpenModelSettings={() => { setSettingsTab('models'); setSettingsOpen(true); }}
                 />
               )}
             </div>
             {artifact && (
               <AssetPanel
-                api={api}
                 artifact={artifact}
                 onChange={setArtifact}
               />
@@ -264,11 +259,17 @@ export default function App({ api: providedApi }: AppProps) {
               </button>
             </nav>
             {settingsTab === 'models'
-              ? <ModelSettings api={api} />
-              : <PreferenceSettings api={api} />}
+              ? <ModelSettings />
+              : <PreferenceSettings />}
           </section>
         </div>
       )}
+      {changingPassword && (
+        <div className="settings-overlay">
+          <LoginForm username={username} onClose={() => setChangingPassword(false)} />
+        </div>
+      )}
     </main>
+    </ModelProvider>
   );
 }

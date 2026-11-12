@@ -15,6 +15,7 @@ export interface ExtractedDocument {
 
 export const MAX_EXTRACTED_DOCUMENT_CHARACTERS = MAX_AGENT_DOCUMENT_CHARACTERS;
 
+/** 清理并校验提取出的文本：不能为空，也不能超过上限。 */
 function validateExtractedText(text: string): ExtractedDocument {
   const normalized = text.trim();
   if (!normalized) {
@@ -28,6 +29,10 @@ function validateExtractedText(text: string): ExtractedDocument {
   return { text: normalized };
 }
 
+/**
+ * 从文档中提取纯文本：txt/md 直接按 UTF-8 解码；PDF 用 pdfjs 逐页读取文字。
+ * 注意：扫描版 PDF（只有图片）提取不到文字，会因“没有文本”而报错。
+ */
 export async function extractDocument({
   mediaType,
   bytes,
@@ -44,6 +49,7 @@ export async function extractDocument({
     throw new TypeError(`Unsupported document media type: ${mediaType}`);
   }
 
+  // pdfjs 会持有内部资源，用完必须 destroy
   const loadingTask = getDocument({ data: bytes });
   try {
     const document = await loadingTask.promise;

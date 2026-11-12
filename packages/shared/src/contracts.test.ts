@@ -18,13 +18,11 @@ const validModelSelection = {
     providerId: 'agnes',
     modelId: 'agnes/agnes-3.0-flash',
     baseURL: 'https://apihub.agnes-ai.com/v1',
-    apiKeyConfigured: true,
   },
   image: {
     providerId: 'agnes',
     modelId: 'agnes-image-2.5-flash',
     baseURL: 'https://apihub.agnes-ai.com/v1',
-    apiKeyConfigured: false,
   },
 };
 
@@ -39,7 +37,7 @@ const validAttachment = (id: string, size: number, mediaType = 'image/png') => (
 });
 
 describe('shared model settings', () => {
-  it('acceptsModelSettingsWithoutCredentialValues', () => {
+  it('acceptsModelSelectionWithoutCredentialFields', () => {
     const parsed = modelSelectionSchema.parse(validModelSelection);
 
     expect(parsed).toEqual(validModelSelection);
@@ -141,10 +139,8 @@ describe('Agent service boundary', () => {
       providerId: 'agnes',
       modelId: 'agnes/agnes-3.0-flash',
       baseURL: 'https://apihub.agnes-ai.com/v1',
-      protocol: 'openai-compatible',
-      apiKey: 'test-only-key',
-      supportsInlineImages: true,
     },
+    apiKey: 'example-test-key',
     messages: [{ role: 'user', content: 'Create a small stone sculpture.' }],
     documents: [{ fileName: 'brief.txt', mediaType: 'text/plain', text: 'Low poly, faceted.' }],
     images: [{
@@ -198,6 +194,7 @@ describe('Agent service boundary', () => {
   it('acceptsAttachmentOnlyTurnsInTheTrustedAgentContext', () => {
     expect(agentChatRequestContextSchema.safeParse({
       model: validRequest.model,
+      apiKey: validRequest.apiKey,
       latestUserText: '',
       documents: validRequest.documents,
       images: [{ fileName: 'reference.png', mediaType: 'image/png' }],
@@ -208,6 +205,7 @@ describe('Agent service boundary', () => {
   it('acceptsAllAttachmentMetadataAllowedByTheChatRequestContext', () => {
     const context = {
       model: validRequest.model,
+      apiKey: validRequest.apiKey,
       latestUserText: 'Create from the attachments.',
       documents: Array.from({ length: 9 }, () => validRequest.documents[0]!),
       images: Array.from({ length: 6 }, () => ({
@@ -223,6 +221,7 @@ describe('Agent service boundary', () => {
   it('rejectsRequestContextsExceedingTheChatAttachmentLimit', () => {
     const context = {
       model: validRequest.model,
+      apiKey: validRequest.apiKey,
       latestUserText: 'Create from the attachments.',
       documents: Array.from({ length: 11 }, () => validRequest.documents[0]!),
       images: Array.from({ length: 10 }, () => ({

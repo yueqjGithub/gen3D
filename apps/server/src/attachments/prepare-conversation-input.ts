@@ -7,11 +7,13 @@ import {
 
 const imageMediaTypes: ReadonlySet<string> = new Set(supportedImageMediaTypes);
 
+/** 发给 Agent 前整理好的附件内容：文档被提取为文本，图片被转成 data URL。 */
 export interface PreparedConversationInput {
   documents: Array<{ fileName: string; mediaType: string; text: string }>;
   images: Array<{ fileName: string; mediaType: string; dataUrl: string }>;
 }
 
+/** 所选对话模型不支持图片输入，却上传了图片。 */
 export class UnsupportedInlineImageError extends Error {
   constructor() {
     super('The selected chat provider does not document support for inline image input.');
@@ -19,7 +21,7 @@ export class UnsupportedInlineImageError extends Error {
   }
 }
 
-// Images remain local and are sent inline only when the selected provider supports that format.
+// 图片只保存在本地，仅当所选模型支持图片输入时，才以 base64 data URL 的形式内联发送给 Agent
 export function toInlineImageDataUrl(mediaType: string, bytes: Uint8Array): string {
   if (!imageMediaTypes.has(mediaType)) {
     throw new TypeError(`Unsupported image media type: ${mediaType}`);
@@ -30,6 +32,10 @@ export function toInlineImageDataUrl(mediaType: string, bytes: Uint8Array): stri
   return `data:${mediaType};base64,${Buffer.from(bytes).toString('base64')}`;
 }
 
+/**
+ * 读取本轮选中的附件并转换为 Agent 可用的输入：
+ * 图片 → data URL；文档 → 提取文本，并限制所有文档合计的字符数，防止上下文过大。
+ */
 export async function prepareConversationInput(
   attachments: AttachmentStore,
   conversationId: string,

@@ -1,51 +1,121 @@
-import { mkdtempSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { LibSQLStore } from '@mastra/libsql';
 import { createArtifactRepository } from './artifacts';
 import { createAttachmentStore } from './attachments';
 import { createConversationRepository } from './conversations';
 import { createDatabase } from './database';
 import { databaseMigrations } from './migration-scripts';
 import { createPreferenceRepository } from './preferences';
+import { createTestDirectory } from '../test-directory';
 
 describe('SQLite storage', () => {
   let directory: string;
   let databasePath: string;
-  let database: ReturnType<typeof createDatabase>;
+  let database: Awaited<ReturnType<typeof createDatabase>>;
 
-  beforeEach(() => {
-    directory = mkdtempSync(join(tmpdir(), 'agent3d-storage-'));
+  beforeEach(async () => {
+    directory = createTestDirectory('storage-');
     databasePath = join(directory, 'app.sqlite');
-    database = createDatabase(databasePath);
+    database = await createDatabase(databasePath);
+    database.connection.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run('agent3d-local', 'test');
   });
 
   afterEach(() => {
     database.close();
-    rmSync(directory, { recursive: true, force: true });
   });
 
   it('embedsAllSqlMigrationsForBundledDesktopStartup', () => {
-    expect(databaseMigrations.map(({ version }) => version)).toEqual([1, 2, 3]);
+    expect(databaseMigrations.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5]);
     expect(databaseMigrations.map(({ sql }) => sql).join('\n')).toContain(
       'CREATE TABLE chat_turns',
     );
   });
 
-  it('migrationIsIdempotent', () => {
+  it('migrationIsIdempotent', async () => {
     database.close();
-    database = createDatabase(databasePath);
+    database = await createDatabase(databasePath);
     database.close();
-    database = createDatabase(databasePath);
+    database = await createDatabase(databasePath);
 
     expect(database.connection.pragma('foreign_keys', { simple: true })).toBe(1);
-    expect(createConversationRepository(database.connection).list()).toEqual([]);
+    expect(createConversationRepository(database.connection).list('agent3d-local')).toEqual([]);
+  });
+
+  it('rejects a database with legacy conversation tables', async () => {
+    database.connection.exec('CREATE TABLE conversations (id TEXT PRIMARY KEY)');
+    database.close();
+    await expect(createDatabase(databasePath)).rejects.toThrow('Legacy conversation tables');
+    database = await createDatabase(join(directory, 'fresh.sqlite'));
+  });
+
+  it('stores conversations and messages in Mastra memory tables', async () => {
+    const conversations = createConversationRepository(database.connection);
+    const conversation = conversations.create('Shared memory', 'agent3d-local');
+    const message = {
+      id: randomUUID(),
+      conversationId: conversation.id,
+      role: 'user' as const,
+      parts: [{ type: 'text' as const, text: 'Hello Mastra' }],
+      createdAt: new Date().toISOString(),
+      status: 'complete' as const,
+    };
+    conversations.appendMessage(message);
+    expect(database.connection.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('conversations', 'messages')
+    `).all()).toEqual([]);
+    expect(database.connection.prepare('SELECT id FROM mastra_threads WHERE id = ?').get(conversation.id))
+      .toEqual({ id: conversation.id });
+    const row = database.connection.prepare('SELECT content FROM mastra_messages WHERE id = ?')
+      .get(message.id) as { content: string };
+    expect(JSON.parse(row.content)).toMatchObject({
+      format: 2,
+      parts: [{ type: 'text', text: 'Hello Mastra' }],
+    });
+    expect(conversations.listMessages(conversation.id)).toEqual([message]);
+    const storage = new LibSQLStore({ id: 'memory-read-test', url: `file:${databasePath}` });
+    try {
+      const memory = await storage.getStore('memory');
+      expect(memory).toBeDefined();
+      const thread = await memory!.getThreadById({ threadId: conversation.id });
+      expect(thread).toMatchObject({ id: conversation.id, title: 'Shared memory' });
+      const result = await memory!.listMessages({
+        threadId: conversation.id,
+        resourceId: 'agent3d-local',
+        perPage: false,
+      });
+      expect(result.messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: message.id, content: expect.objectContaining({
+          parts: [{ type: 'text', text: 'Hello Mastra' }],
+        }) }),
+      ]));
+      const nativeId = randomUUID();
+      const createdAt = new Date();
+      await memory!.saveMessages({ messages: [{
+        id: nativeId,
+        threadId: conversation.id,
+        resourceId: 'agent3d-local',
+        role: 'assistant',
+        createdAt,
+        content: { format: 2, parts: [{ type: 'text', text: 'Hello from Mastra' }] },
+      }] });
+      expect(conversations.listMessages(conversation.id)).toContainEqual({
+        id: nativeId,
+        conversationId: conversation.id,
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'Hello from Mastra' }],
+        createdAt: createdAt.toISOString(),
+        status: 'complete',
+      });
+    } finally {
+      await storage.close();
+    }
   });
 
   it('conversationCrudPreservesMessageOrder', () => {
     const conversations = createConversationRepository(database.connection);
-    const conversation = conversations.create('Stone sculpture');
+    const conversation = conversations.create('Stone sculpture', 'agent3d-local');
 
     conversations.appendMessage({
       id: '123e4567-e89b-42d3-a456-426614174001',
@@ -68,7 +138,7 @@ describe('SQLite storage', () => {
       '123e4567-e89b-42d3-a456-426614174002',
       '123e4567-e89b-42d3-a456-426614174001',
     ]);
-    expect(conversations.rename(conversation.id, 'Faceted stone')).toMatchObject({
+    expect(conversations.rename(conversation.id, 'Faceted stone', 'agent3d-local')).toMatchObject({
       id: conversation.id,
       title: 'Faceted stone',
     });
@@ -76,7 +146,7 @@ describe('SQLite storage', () => {
 
   it('chatTurnIdempotencyReusesFailedTurnWithoutDuplicatingMessages', () => {
     const conversations = createConversationRepository(database.connection);
-    const conversation = conversations.create('Idempotent turn');
+    const conversation = conversations.create('Idempotent turn', 'agent3d-local');
     const clientTurnId = randomUUID();
     const userMessage = {
       id: randomUUID(),
@@ -130,9 +200,9 @@ describe('SQLite storage', () => {
     })).toThrow();
   });
 
-  it('recoversInterruptedChatTurnsAsRetryableAfterRestart', () => {
+  it('recoversInterruptedChatTurnsAsRetryableAfterRestart', async () => {
     const conversations = createConversationRepository(database.connection);
-    const conversation = conversations.create('Interrupted turn');
+    const conversation = conversations.create('Interrupted turn', 'agent3d-local');
     const clientTurnId = randomUUID();
     const userMessage = {
       id: randomUUID(),
@@ -145,7 +215,7 @@ describe('SQLite storage', () => {
 
     conversations.beginTurn(conversation.id, clientTurnId, userMessage);
     database.close();
-    database = createDatabase(databasePath);
+    database = await createDatabase(databasePath);
 
     const retry = createConversationRepository(database.connection).beginTurn(
       conversation.id,
@@ -159,7 +229,7 @@ describe('SQLite storage', () => {
     const conversations = createConversationRepository(database.connection);
     const artifacts = createArtifactRepository(database.connection);
     const attachments = createAttachmentStore(database.connection, join(directory, 'attachments'));
-    const conversation = conversations.create('Temporary asset');
+    const conversation = conversations.create('Temporary asset', 'agent3d-local');
     const artifact = artifacts.createPending({
       conversationId: conversation.id,
       brief: 'A temporary faceted asset.',
@@ -172,10 +242,10 @@ describe('SQLite storage', () => {
       new Uint8Array([1, 2, 3]),
     );
 
-    expect(conversations.delete(conversation.id)).toBe(true);
+    expect(conversations.delete(conversation.id, 'agent3d-local')).toBe(true);
     await attachments.deleteByConversation(conversation.id);
 
-    expect(conversations.get(conversation.id)).toBeNull();
+    expect(conversations.get(conversation.id, 'agent3d-local')).toBeNull();
     expect(conversations.listMessages(conversation.id)).toEqual([]);
     expect(artifacts.get(artifact.id)).toBeNull();
     expect(await attachments.read(attachment.id)).toBeNull();
@@ -184,17 +254,17 @@ describe('SQLite storage', () => {
   it('preferenceRepositoryPersistsExplicitValues', () => {
     const preferences = createPreferenceRepository(database.connection);
 
-    preferences.upsert('visualStyle', 'faceted');
+    preferences.upsert('visualStyle', 'faceted', 'agent3d-local');
 
-    expect(preferences.list()).toEqual({ visualStyle: 'faceted' });
-    expect(preferences.delete('visualStyle')).toBe(true);
-    expect(preferences.list()).toEqual({});
+    expect(preferences.list('agent3d-local')).toEqual({ visualStyle: 'faceted' });
+    expect(preferences.delete('visualStyle', 'agent3d-local')).toBe(true);
+    expect(preferences.list('agent3d-local')).toEqual({});
   });
 
   it('artifactUpdateRequiresExpectedVersion', () => {
     const conversations = createConversationRepository(database.connection);
     const artifacts = createArtifactRepository(database.connection);
-    const conversation = conversations.create('Versioned asset');
+    const conversation = conversations.create('Versioned asset', 'agent3d-local');
     const artifact = artifacts.createPending({
       conversationId: conversation.id,
       brief: 'A faceted asset.',
@@ -210,7 +280,7 @@ describe('SQLite storage', () => {
   it('attachmentStoreRejectsPathTraversal', async () => {
     const conversations = createConversationRepository(database.connection);
     const attachments = createAttachmentStore(database.connection, join(directory, 'attachments'));
-    const conversation = conversations.create('Path validation');
+    const conversation = conversations.create('Path validation', 'agent3d-local');
 
     await expect(attachments.save(
       conversation.id,

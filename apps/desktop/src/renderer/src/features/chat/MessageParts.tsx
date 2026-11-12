@@ -8,6 +8,7 @@ export interface MessagePartsProps {
   onConfirmPreference?(proposal: PreferenceProposal): Promise<void> | void;
 }
 
+/** 按消息 part 的类型渲染文本、推理、工具活动、附件、资产和偏好建议。 */
 export function MessageParts({
   message,
   onOpenAsset,
@@ -15,6 +16,7 @@ export function MessageParts({
 }: MessagePartsProps) {
   const [proposalError, setProposalError] = useState<string | null>(null);
 
+  // 偏好建议必须由用户点击确认后才保存；失败时保留提示供用户重试。
   async function confirm(proposal: PreferenceProposal) {
     if (!onConfirmPreference) {
       return;
@@ -34,7 +36,20 @@ export function MessageParts({
       )}
       {message.parts.map((part, index) => {
         if (part.type === 'text') {
-          return <p className="message-parts__text" key={`text-${index}`}>{part.text}</p>;
+          // 按代码围栏拆分，React 自动转义文本，避免执行模型输出的 HTML。
+          return <div className="message-parts__text" key={index}>{part.text.split(/(```[\s\S]*?```|!\[[^\]]*\]\([^)]+\))/g).map((block, i) => {
+            if (block.startsWith('```')) return <pre key={i}><code>{block.replace(/^```[^\n]*\n?/, '').replace(/```$/, '')}</code></pre>;
+            const image = /^!\[([^\]]*)\]\((https?:\/\/[^)]+|data:image\/[^)]+)\)$/.exec(block);
+            return image ? <img key={i} src={image[2]} alt={image[1]} style={{maxWidth: '100%'}} /> : <span key={i}>{block}</span>;
+          })}</div>;
+        }
+        // useChat 已经把原生工具事件合并为一个带 state 的工具 part。
+        if (part.type === 'dynamic-tool' || part.type.startsWith('tool-')) {
+          const tool = part as { type: string; toolName?: string; state?: string; input?: unknown; output?: unknown; errorText?: string };
+          return <details key={index}><summary>{tool.toolName ?? tool.type.slice(5)} · {tool.state}</summary><pre>{JSON.stringify(tool.input, null, 2)}</pre><pre>{tool.errorText ?? JSON.stringify(tool.output, null, 2)}</pre></details>;
+        }
+        if (part.type === 'file') {
+          return part.mediaType.startsWith('image/') ? <img key={index} src={part.url} alt={part.filename ?? '图片'} style={{maxWidth: '100%'}} /> : <a key={index} href={part.url}>{part.filename ?? '附件'}</a>;
         }
         if (part.type === 'reasoning') {
           return (

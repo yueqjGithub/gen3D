@@ -6,22 +6,13 @@ import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 const appRoot = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig({
+  // main 编译 Electron 主进程，renderer 编译 React 页面。
   main: {
     plugins: [externalizeDepsPlugin({ exclude: ['@agent3d/shared'] })],
   },
-  preload: {
-    plugins: [externalizeDepsPlugin()],
-    build: {
-      rollupOptions: {
-        output: {
-          format: 'cjs',
-          entryFileNames: '[name].cjs',
-        },
-      },
-    },
-  },
   renderer: {
     server: {
+      // 与 Server 的来源校验保持一致；端口被占用时直接报错，不自动换端口。
       host: 'localhost',
       port: 5173,
       strictPort: true,

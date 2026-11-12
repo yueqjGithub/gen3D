@@ -7,51 +7,12 @@ import {
   preferenceProposalSchema,
   uploadMetadataSchema,
   type ApiError,
-  type AssetArtifact,
-  type Conversation,
   type ModelSelection,
-  type PreferenceProposal,
-  type UploadMetadata,
 } from '@agent3d/shared';
 import { z } from 'zod';
 import type { ArtifactDetails, ChatDataParts, ChatUIMessage, ModelSettings } from './types';
 
-export interface DesktopBridge {
-  platform: string;
-  apiBaseUrl: string;
-  apiToken: string;
-}
-
-export interface ApiClient {
-  baseUrl: string;
-  authHeaders(): Record<string, string>;
-  fetch: typeof fetch;
-  listConversations(): Promise<Conversation[]>;
-  createConversation(title?: string): Promise<Conversation>;
-  renameConversation(id: string, title: string): Promise<Conversation>;
-  deleteConversation(id: string): Promise<void>;
-  getMessages(conversationId: string): Promise<ChatUIMessage[]>;
-  uploadAttachment(conversationId: string, file: File): Promise<UploadMetadata>;
-  getArtifact(id: string): Promise<ArtifactDetails>;
-  updateArtifact(id: string, expectedVersion: number, script: string): Promise<ArtifactDetails>;
-  approveArtifact(id: string, expectedVersion: number): Promise<AssetArtifact>;
-  rejectArtifact(id: string, expectedVersion: number): Promise<AssetArtifact>;
-  downloadArtifact(id: string): Promise<Blob>;
-  getModelSettings(): Promise<ModelSettings>;
-  saveModelSettings(selection: ModelSelection): Promise<ModelSelection>;
-  saveCredential(providerId: string, apiKey: string): Promise<void>;
-  removeCredential(providerId: string): Promise<void>;
-  getPreferences(): Promise<Record<string, string>>;
-  savePreference(key: string, value: string): Promise<Record<string, string>>;
-  deletePreference(key: string): Promise<void>;
-}
-
-declare global {
-  interface Window {
-    desktopApi?: DesktopBridge;
-  }
-}
-
+/** Hono 的错误响应同时保留错误码、是否可重试和 HTTP 状态码。 */
 export class LocalApiError extends Error {
   constructor(
     message: string,
@@ -69,6 +30,7 @@ const scriptValidationSchema = z.object({
   code: z.string().optional(),
 }).strict();
 
+// 偏好是字符串键值对，读取和保存都会返回这一结构。
 function parsePreferences(value: unknown): Record<string, string> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('The local API returned invalid preferences.');
@@ -83,61 +45,89 @@ function parsePreferences(value: unknown): Record<string, string> {
   );
 }
 
-function messageFromUnknown(error: unknown): string {
-  const parsed = apiErrorSchema.safeParse(error);
-  return parsed.success ? parsed.data.message : 'The local API request failed.';
+const baseUrl = 'http://127.0.0.1:62586';
+
+// 普通 JSON 接口共用请求与错误处理；下载文件和聊天流分别使用自己的响应方式。
+async function request(path: string, init?: RequestInit): Promise<unknown> {
+  const response = await fetch(`${baseUrl}/api${path}`, { ...init, credentials: 'include' });
+  if (response.status === 204) {
+    return undefined;
+  }
+
+  const body: unknown = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    const parsed = apiErrorSchema.safeParse(body);
+    const error: ApiError = parsed.success
+      ? parsed.data
+      : {
+        code: 'INTERNAL_ERROR',
+        message: 'The local API request failed.',
+        retryable: false,
+      };
+    throw new LocalApiError(error.message, error.code, error.retryable, response.status);
+  }
+  return body;
 }
 
-export function createApiClient(
-  bridge: DesktopBridge | undefined = window.desktopApi,
-  fetcher: typeof fetch = globalThis.fetch,
-): ApiClient {
-  if (!bridge?.apiBaseUrl || !bridge.apiToken) {
-    throw new Error('The local API bridge is not ready. Restart the desktop application.');
-  }
-
-  const baseUrl = bridge.apiBaseUrl.replace(/\/+$/, '');
-  const authHeaders = (): Record<string, string> => ({
-    'X-Agent3D-Token': bridge.apiToken,
-  });
-  const fetchWithToken: typeof fetch = (input, init) => {
-    const headers = new Headers(init?.headers);
-    headers.set('X-Agent3D-Token', bridge.apiToken);
-    return fetcher(input, { ...init, headers });
+// 资产详情不仅用于面板，也用于把历史消息中的资产 ID 还原成完整资产。
+async function getArtifact(id: string): Promise<ArtifactDetails> {
+  const response = await request(`/artifacts/${encodeURIComponent(id)}`);
+  const result = response as { artifact: unknown; scriptValidation: unknown };
+  return {
+    artifact: assetArtifactSchema.parse(result.artifact),
+    scriptValidation: scriptValidationSchema.parse(result.scriptValidation),
   };
+}
 
-  async function request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetchWithToken(`${baseUrl}/api${path}`, init);
-    if (response.status === 204) {
-      return undefined as T;
-    }
-
-    const body: unknown = await response.json().catch(() => undefined);
-    if (!response.ok) {
-      const parsed = apiErrorSchema.safeParse(body);
-      const error: ApiError = parsed.success
-        ? parsed.data
-        : {
-          code: 'INTERNAL_ERROR',
-          message: messageFromUnknown(body),
-          retryable: false,
-        };
-      throw new LocalApiError(error.message, error.code, error.retryable, response.status);
-    }
-    return body as T;
-  }
-
-  async function getArtifact(id: string): Promise<ArtifactDetails> {
-    const response = await request<unknown>(`/artifacts/${encodeURIComponent(id)}`);
-    const result = response as { artifact: unknown; scriptValidation: unknown };
-    return {
-      artifact: assetArtifactSchema.parse(result.artifact),
-      scriptValidation: scriptValidationSchema.parse(result.scriptValidation),
-    };
-  }
-
-  async function getMessages(conversationId: string): Promise<ChatUIMessage[]> {
-    const response = await request<unknown>(
+// 界面直接使用同一个 API 对象，不再创建客户端或逐层传递实例。
+export const api = {
+  baseUrl,
+  async currentUser() {
+    const response = await request('/login');
+    return z.object({ username: z.string() }).parse(response).username;
+  },
+  async login(username: string, password: string) {
+    const response = await request('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    return z.object({ username: z.string() }).parse(response).username;
+  },
+  async changePassword(username: string, oldPassword: string, newPassword: string) {
+    await request('/login/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, oldPassword, newPassword }),
+    });
+  },
+  async listConversations() {
+    const response = await request('/conversations');
+    return conversationSchema.array().parse((response as { conversations: unknown }).conversations);
+  },
+  async createConversation(title = 'New conversation') {
+    const response = await request('/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    });
+    return conversationSchema.parse((response as { conversation: unknown }).conversation);
+  },
+  async renameConversation(id: string, title: string) {
+    const response = await request(`/conversations/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    });
+    return conversationSchema.parse((response as { conversation: unknown }).conversation);
+  },
+  async deleteConversation(id: string) {
+    await request(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+  // 数据库的消息与 UI 无关；在这里转换成 useChat 所需的 parts。
+  // 资产消息只存 ID，需要请求详情以获得最新版本和审批状态。
+  async getMessages(conversationId: string): Promise<ChatUIMessage[]> {
+    const response = await request(
       `/conversations/${encodeURIComponent(conversationId)}/messages`,
     );
     const parsed = response as { messages: unknown };
@@ -185,142 +175,104 @@ export function createApiClient(
         parts,
       };
     }));
-  }
-
-  return {
-    baseUrl,
-    authHeaders,
-    fetch: fetchWithToken,
-    async listConversations() {
-      const response = await request<unknown>('/conversations');
-      return conversationSchema.array().parse((response as { conversations: unknown }).conversations);
-    },
-    async createConversation(title = 'New conversation') {
-      const response = await request<unknown>('/conversations', {
+  },
+  async uploadAttachment(conversationId: string, file: File) {
+    // FormData 自动生成 multipart 边界，不要手动设置 Content-Type。
+    const form = new FormData();
+    form.set('file', file);
+    const response = await request(
+      `/conversations/${encodeURIComponent(conversationId)}/attachments`,
+      { method: 'POST', body: form },
+    );
+    return uploadMetadataSchema.parse((response as { attachment: unknown }).attachment);
+  },
+  getArtifact,
+  async updateArtifact(id: string, expectedVersion: number, script: string) {
+    // expectedVersion 交给服务端做乐观锁检查，避免覆盖别处的新版本。
+    const response = await request(`/artifacts/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedVersion, script }),
+    });
+    const result = response as { artifact: unknown; scriptValidation: unknown };
+    return {
+      artifact: assetArtifactSchema.parse(result.artifact),
+      scriptValidation: scriptValidationSchema.parse(result.scriptValidation),
+    };
+  },
+  async approveArtifact(id: string, expectedVersion: number) {
+    const response = await request(
+      `/artifacts/${encodeURIComponent(id)}/approve`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title }),
-      });
-      return conversationSchema.parse((response as { conversation: unknown }).conversation);
-    },
-    async renameConversation(id, title) {
-      const response = await request<unknown>(`/conversations/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
+        body: JSON.stringify({ expectedVersion }),
+      },
+    );
+    return assetArtifactSchema.parse((response as { artifact: unknown }).artifact);
+  },
+  async rejectArtifact(id: string, expectedVersion: number) {
+    const response = await request(
+      `/artifacts/${encodeURIComponent(id)}/reject`,
+      {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title }),
-      });
-      return conversationSchema.parse((response as { conversation: unknown }).conversation);
-    },
-    async deleteConversation(id) {
-      await request(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    },
-    getMessages,
-    async uploadAttachment(conversationId, file) {
-      const form = new FormData();
-      form.set('file', file);
-      const response = await request<unknown>(
-        `/conversations/${encodeURIComponent(conversationId)}/attachments`,
-        { method: 'POST', body: form },
-      );
-      return uploadMetadataSchema.parse((response as { attachment: unknown }).attachment);
-    },
-    getArtifact,
-    async updateArtifact(id, expectedVersion, script) {
-      const response = await request<unknown>(`/artifacts/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expectedVersion, script }),
-      });
-      const result = response as { artifact: unknown; scriptValidation: unknown };
-      return {
-        artifact: assetArtifactSchema.parse(result.artifact),
-        scriptValidation: scriptValidationSchema.parse(result.scriptValidation),
-      };
-    },
-    async approveArtifact(id, expectedVersion) {
-      const response = await request<unknown>(
-        `/artifacts/${encodeURIComponent(id)}/approve`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ expectedVersion }),
-        },
-      );
-      return assetArtifactSchema.parse((response as { artifact: unknown }).artifact);
-    },
-    async rejectArtifact(id, expectedVersion) {
-      const response = await request<unknown>(
-        `/artifacts/${encodeURIComponent(id)}/reject`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ expectedVersion }),
-        },
-      );
-      return assetArtifactSchema.parse((response as { artifact: unknown }).artifact);
-    },
-    async downloadArtifact(id) {
-      const response = await fetchWithToken(
-        `${baseUrl}/api/artifacts/${encodeURIComponent(id)}/download`,
-      );
-      if (!response.ok) {
-        const body: unknown = await response.json().catch(() => undefined);
-        const parsed = apiErrorSchema.safeParse(body);
-        const error = parsed.success
-          ? parsed.data
-          : { code: 'INTERNAL_ERROR' as const, message: messageFromUnknown(body), retryable: false };
-        throw new LocalApiError(error.message, error.code, error.retryable, response.status);
-      }
-      return response.blob();
-    },
-    async getModelSettings() {
-      const response = await request<unknown>('/models');
-      const result = response as { providers: ModelSettings['providers']; selection: unknown };
-      return {
-        providers: result.providers,
-        selection: modelSelectionSchema.parse(result.selection),
-      };
-    },
-    async saveModelSettings(selection) {
-      const response = await request<unknown>('/models', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(selection),
-      });
-      return modelSelectionSchema.parse((response as { selection: unknown }).selection);
-    },
-    async saveCredential(providerId, apiKey) {
-      await request(`/models/credentials/${encodeURIComponent(providerId)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey }),
-      });
-    },
-    async removeCredential(providerId) {
-      await request(`/models/credentials/${encodeURIComponent(providerId)}`, {
-        method: 'DELETE',
-      });
-    },
-    async getPreferences() {
-      const response = await request<unknown>('/preferences');
-      const values = (response as { preferences: unknown }).preferences;
-      return parsePreferences(values);
-    },
-    async savePreference(key, value) {
-      const response = await request<unknown>('/preferences', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, value }),
-      });
-      const values = (response as { preferences: unknown }).preferences;
-      return parsePreferences(values);
-    },
-    async deletePreference(key) {
-      await request('/preferences', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key }),
-      });
-    },
-  };
-}
+        body: JSON.stringify({ expectedVersion }),
+      },
+    );
+    return assetArtifactSchema.parse((response as { artifact: unknown }).artifact);
+  },
+  async downloadArtifact(id: string) {
+    // 下载返回二进制 Blob，而不是 JSON；失败时仍按普通 API 错误解析。
+    const response = await fetch(
+      `${baseUrl}/api/artifacts/${encodeURIComponent(id)}/download`,
+      { credentials: 'include' },
+    );
+    if (!response.ok) {
+      const body: unknown = await response.json().catch(() => undefined);
+      const parsed = apiErrorSchema.safeParse(body);
+      const error = parsed.success
+        ? parsed.data
+        : { code: 'INTERNAL_ERROR' as const, message: 'The local API request failed.', retryable: false };
+      throw new LocalApiError(error.message, error.code, error.retryable, response.status);
+    }
+    return response.blob();
+  },
+  async getModelSettings() {
+    const response = await request('/models');
+    const result = response as { providers: ModelSettings['providers']; selection: unknown };
+    return {
+      providers: result.providers,
+      selection: modelSelectionSchema.parse(result.selection),
+    };
+  },
+  async saveModelSettings(selection: ModelSelection) {
+    const response = await request('/models', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(selection),
+    });
+    return modelSelectionSchema.parse((response as { selection: unknown }).selection);
+  },
+  async getPreferences() {
+    const response = await request('/preferences');
+    const values = (response as { preferences: unknown }).preferences;
+    return parsePreferences(values);
+  },
+  async savePreference(key: string, value: string) {
+    const response = await request('/preferences', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value }),
+    });
+    const values = (response as { preferences: unknown }).preferences;
+    return parsePreferences(values);
+  },
+  async deletePreference(key: string) {
+    await request('/preferences', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+  },
+};

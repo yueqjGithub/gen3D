@@ -7,14 +7,17 @@ import type { AttachmentStore } from '../storage/attachments';
 import type { createConversationRepository } from '../storage/conversations';
 import { extractDocument } from '../attachments/extract-document';
 import { HttpError } from '../http-errors';
+import { getCookie } from 'hono/cookie';
 
 type ConversationRepository = ReturnType<typeof createConversationRepository>;
+// 各类文件的“魔数”（文件头），用来确认文件内容与声明的类型一致，防止改后缀伪装
 const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 function startsWithBytes(bytes: Uint8Array, signature: number[]): boolean {
   return signature.every((value, index) => bytes[index] === value);
 }
 
+/** 校验文件内容与 mediaType 是否匹配：图片/PDF 检查文件头，文本必须是合法 UTF-8。 */
 function validateFileContent(mediaType: string, bytes: Uint8Array): void {
   if (mediaType === 'image/png' && !startsWithBytes(bytes, pngSignature)) {
     throw new HttpError(400, 'ATTACHMENT_INVALID', 'The file contents do not match image/png.');
@@ -47,6 +50,7 @@ function validateFileContent(mediaType: string, bytes: Uint8Array): void {
   }
 }
 
+/** 上传阶段就尝试提取文档文本，提前发现损坏的 PDF / 空文档，并转成清晰的 400 错误。 */
 async function validateDocument(mediaType: string, bytes: Uint8Array): Promise<void> {
   try {
     await extractDocument({ mediaType, bytes });
@@ -70,15 +74,20 @@ export interface AttachmentRouteDependencies {
   attachments: AttachmentStore;
 }
 
+/**
+ * 附件上传：POST /api/conversations/:id/attachments（multipart/form-data，字段名 file）。
+ * 校验顺序：会话存在 → 体积 → 类型白名单 → 文件头 → 文档可读，全部通过后才保存。
+ */
 export function createAttachmentRoutes({ conversations, attachments }: AttachmentRouteDependencies) {
   const routes = new Hono();
 
   routes.post('/conversations/:id/attachments', async (context) => {
-    const conversation = conversations.get(context.req.param('id'));
+    const conversation = conversations.get(context.req.param('id'), getCookie(context, 'username')!);
     if (!conversation) {
       throw new HttpError(404, 'NOT_FOUND', 'The requested conversation does not exist.');
     }
 
+    // 先用 Content-Length 提前拒绝过大的请求（多留 64KB 给 multipart 边界等开销），避免把大文件读进内存
     const contentLength = Number(context.req.header('Content-Length') ?? 0);
     if (contentLength > MAX_ATTACHMENT_BYTES + 64 * 1024) {
       throw new HttpError(
@@ -104,6 +113,7 @@ export function createAttachmentRoutes({ conversations, attachments }: Attachmen
       );
     }
 
+    // 浏览器给的 file.type 可能带 charset 参数，这里只取主类型并统一小写后与白名单比较
     const [rawMediaType = ''] = file.type.split(';');
     const mediaType = rawMediaType.trim().toLowerCase();
     if (!(supportedMediaTypes as readonly string[]).includes(mediaType)) {

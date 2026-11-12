@@ -16,9 +16,6 @@ const serviceModelSchema = z.object({
     (value) => value.startsWith('http://') || value.startsWith('https://'),
     'Model URL must use HTTP or HTTPS',
   ),
-  protocol: z.enum(['openai-compatible', 'anthropic']),
-  apiKey: z.string().trim().min(1).max(4_096),
-  supportsInlineImages: z.boolean(),
 }).strict();
 
 const serviceDocumentSchema = z.object({
@@ -50,6 +47,7 @@ const agentChatImageMetadataSchema = z.object({
  */
 export const agentChatRequestContextSchema = z.object({
   model: serviceModelSchema,
+  apiKey: z.string().trim().min(1).max(4096),
   latestUserText: z.string().max(50_000),
   documents: z.array(serviceDocumentSchema).max(MAX_CONVERSATION_ATTACHMENTS),
   images: z.array(agentChatImageMetadataSchema).max(MAX_CONVERSATION_ATTACHMENTS),
@@ -68,6 +66,7 @@ export const agentChatRequestContextSchema = z.object({
  */
 export const agentServiceRequestSchema = z.object({
   model: serviceModelSchema,
+  apiKey: z.string().trim().min(1).max(4096),
   messages: z.array(serviceMessageSchema).min(1).max(40)
     .refine((messages) => messages.some(({ role }) => role === 'user'), {
       message: 'At least one user message is required.',
@@ -97,7 +96,7 @@ export const agentServiceRequestSchema = z.object({
 });
 
 /**
- * Returns only the Agent service readiness state; never expose credentials or internals.
+ * Returns Agent readiness without exposing internal diagnostics.
  */
 export const agentServiceHealthSchema = z.object({
   status: z.literal('ready'),
@@ -105,7 +104,7 @@ export const agentServiceHealthSchema = z.object({
 
 /** Prepared conversation message passed across the Hono-to-Agent boundary. */
 export type AgentServiceMessage = z.infer<typeof serviceMessageSchema>;
-/** Resolved model credentials and adapter settings sent in the internal request. */
+/** Selected model metadata sent in the internal request. */
 export type AgentServiceModelConfig = z.infer<typeof serviceModelSchema>;
 /** Extracted document content prepared by Hono for Agent analysis. */
 export type AgentServiceDocument = z.infer<typeof serviceDocumentSchema>;

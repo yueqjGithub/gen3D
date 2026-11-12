@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import {
@@ -9,6 +9,8 @@ import {
   type UploadMetadata,
 } from '@agent3d/shared';
 import type { SqliteDatabase } from './database';
+import { parseEnv } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 interface AttachmentRow {
   id: string;
@@ -20,6 +22,7 @@ interface AttachmentRow {
   created_at: string;
 }
 
+/** 数据库列（下划线）→ 共享契约（驼峰）的转换，同时用 zod 校验数据库里的数据。 */
 function toMetadata(row: AttachmentRow): UploadMetadata {
   return uploadMetadataSchema.parse({
     id: row.id,
@@ -36,6 +39,7 @@ function missingPath(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'ENOENT';
 }
 
+/** 附件存储：元数据保存在 SQLite，文件内容保存在磁盘 <根目录>/<会话id>/<附件id>.blob。 */
 export interface AttachmentStore {
   save(
     conversationId: string,
@@ -50,10 +54,12 @@ export interface AttachmentStore {
 
 export function createAttachmentStore(
   database: SqliteDatabase,
-  rootPath: string,
+  rootPath?: string,
 ): AttachmentStore {
-  const root = resolve(rootPath);
+  const fileDir = parseEnv(readFileSync(fileURLToPath(new URL('../../../../.env', import.meta.url)), 'utf8')).AGENT3D_ATTACHMENT_DIR || ''
+  const root = resolve(fileDir);
 
+  // 磁盘文件名只使用 UUID，不使用用户上传的文件名，避免路径穿越
   function filePath(conversationId: string, attachmentId: string): string {
     return resolve(root, conversationId, `${attachmentId}.blob`);
   }
@@ -65,6 +71,7 @@ export function createAttachmentStore(
       mediaType: string,
       bytes: Uint8Array,
     ): Promise<UploadMetadata> {
+      // 展示用的文件名不能包含路径分隔符
       if (basename(fileName) !== fileName || fileName.includes('\\') || fileName.includes('/')) {
         throw new TypeError('Attachment file name cannot contain a path.');
       }
@@ -85,8 +92,9 @@ export function createAttachmentStore(
         createdAt,
       });
 
+      // 第一步：在事务里检查会话存在和累计大小上限，并先写入元数据记录（占位）
       const reserve = database.transaction(() => {
-        const conversation = database.prepare('SELECT 1 FROM conversations WHERE id = ?')
+        const conversation = database.prepare('SELECT 1 FROM mastra_threads WHERE id = ?')
           .get(conversationId);
         if (!conversation) {
           throw new Error(`Conversation not found: ${conversationId}`);
@@ -115,6 +123,7 @@ export function createAttachmentStore(
       });
       reserve.immediate();
 
+      // 第二步：写文件；失败则回滚刚插入的记录，保证数据库与磁盘一致
       const directory = resolve(root, conversationId);
       const path = filePath(conversationId, id);
       try {
@@ -156,6 +165,7 @@ export function createAttachmentStore(
       return rows.map(toMetadata);
     },
 
+    /** 删除会话的全部附件：先把目录改名成临时“墓碑”，数据库删除成功后再真正删除；失败则改名还原。 */
     async deleteByConversation(conversationId: string): Promise<void> {
       const directory = resolve(root, conversationId);
       const tombstone = resolve(root, `.deleted-${conversationId}-${randomUUID()}`);

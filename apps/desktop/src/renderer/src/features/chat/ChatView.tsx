@@ -1,45 +1,57 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { DefaultChatTransport } from 'ai';
 import { useChat } from '@ai-sdk/react';
-import type { Conversation, PreferenceProposal, UploadMetadata } from '@agent3d/shared';
-import type { ApiClient } from '../../api/client';
+import type { Conversation, UploadMetadata } from '@agent3d/shared';
+import { api } from '../../api/client';
 import type { ChatDataParts, ChatUIMessage } from '../../api/types';
 import { Composer } from './Composer';
 import { MessageParts } from './MessageParts';
+import { useModelSettings } from '../settings/ModelContext';
 
 export interface ChatViewProps {
-  api: ApiClient;
   conversation: Conversation;
   initialMessages: ChatUIMessage[];
   onArtifactChange(artifact: ChatDataParts['asset']): void;
   onOpenAsset(artifactId: string): void;
+  onOpenModelSettings(): void;
 }
 
+/** 一个会话对应一个 useChat 实例；父组件切换会话时通过 key 重建此组件。 */
 export function ChatView({
-  api,
   conversation,
   initialMessages,
   onArtifactChange,
   onOpenAsset,
+  onOpenModelSettings,
 }: ChatViewProps) {
+  const { selection, apiKeys, error: modelError } = useModelSettings();
+  const model = selection?.chat ?? null;
+  const apiKey = model ? apiKeys[`${model.providerId}:${model.modelId}`] ?? '' : '';
+  // useChat 保留同一个 transport；ref 让每次发送和重试都读取最新选择。
+  const modelRef = useRef({ model, apiKey });
+  modelRef.current = { model, apiKey };
   const clientTurnId = useRef<string | null>(null);
   const attachmentIds = useRef<string[]>([]);
   const lastArtifactId = useRef<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // useChat 负责消费流；这里把当前会话、轮次和附件 ID 带到每次聊天请求中。
+  // 重试沿用同一个 clientTurnId，服务端才能识别同一轮请求，避免重复保存。
+  // 历史消息由服务端从数据库读取，所以请求里只带最后一条（本轮用户消息），避免请求体随对话增长。
   const transport = useMemo(() => new DefaultChatTransport<ChatUIMessage>({
     api: `${api.baseUrl}/api/chat`,
-    headers: api.authHeaders(),
-    fetch: api.fetch,
+    credentials: 'include',
     prepareSendMessagesRequest: ({ messages, body }) => ({
       body: {
         ...body,
         conversationId: conversation.id,
         clientTurnId: clientTurnId.current ?? crypto.randomUUID(),
         attachmentIds: attachmentIds.current,
-        messages,
+        model: modelRef.current.model,
+        apiKey: modelRef.current.apiKey,
+        messages: messages.slice(-1),
       },
     }),
-  }), [api, conversation.id]);
+  }), [conversation.id]);
   const chat = useChat<ChatUIMessage>({
     id: conversation.id,
     transport,
@@ -48,10 +60,12 @@ export function ChatView({
   const { setMessages } = chat;
   const busy = chat.status === 'submitted' || chat.status === 'streaming';
 
+  // 父组件加载完历史消息后，将其交给 useChat 作为当前消息列表。
   useEffect(() => {
     setMessages(initialMessages);
   }, [initialMessages, setMessages]);
 
+  // Server 推送的 data-asset 会出现在消息 parts 中，同步给右侧资产面板。
   useEffect(() => {
     const assets = chat.messages.flatMap((message) =>
       message.parts.flatMap((part) => part.type === 'data-asset' ? [part.data] : []));
@@ -62,6 +76,14 @@ export function ChatView({
     }
   }, [chat.messages, onArtifactChange]);
 
+  // 消息新增或流式更新时，把消息区滚动到底部。
+  const messagesRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chat.messages]);
+
+  // 上传发生在 Composer 中；聊天请求只携带附件元数据和已上传的附件 ID。
   async function sendMessage(text: string, attachments: UploadMetadata[]) {
     clientTurnId.current = crypto.randomUUID();
     attachmentIds.current = attachments.map(({ id }) => id);
@@ -85,6 +107,10 @@ export function ChatView({
   }
 
   async function retry() {
+    if (!model || !apiKey.trim()) {
+      setActionError('请先在模型设置中填写 API Key。');
+      return;
+    }
     if (!clientTurnId.current) {
       setActionError('当前请求没有可重试的会话标识。请重新发送消息。');
       return;
@@ -95,10 +121,6 @@ export function ChatView({
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '重试失败。');
     }
-  }
-
-  async function confirmPreference(proposal: PreferenceProposal) {
-    await api.savePreference(proposal.key, proposal.value);
   }
 
   return (
@@ -119,7 +141,7 @@ export function ChatView({
         </div>
       </header>
 
-      <div className="chat-view__messages" aria-label="对话消息" aria-live="polite">
+      <div className="chat-view__messages" ref={messagesRef} aria-label="对话消息" aria-live="polite">
         {chat.messages.length === 0 ? (
           <div className="chat-view__empty">
             <span className="chat-view__empty-mark" aria-hidden="true">◌</span>
@@ -139,7 +161,9 @@ export function ChatView({
               <MessageParts
                 message={message}
                 onOpenAsset={onOpenAsset}
-                onConfirmPreference={confirmPreference}
+                onConfirmPreference={async (proposal) => {
+                  await api.savePreference(proposal.key, proposal.value);
+                }}
               />
             </article>
           ))
@@ -149,7 +173,7 @@ export function ChatView({
       {chat.error && (
         <div className="chat-view__error" role="alert">
           <span>{chat.error.message}</span>
-          <button type="button" onClick={() => void retry()} disabled={busy}>
+          <button type="button" onClick={() => void retry()} disabled={busy || !apiKey.trim()}>
             重试
           </button>
         </div>
@@ -165,6 +189,10 @@ export function ChatView({
         onUpload={(file) => api.uploadAttachment(conversation.id, file)}
         onSubmit={sendMessage}
         disabled={busy}
+        modelId={model?.modelId ?? null}
+        hasApiKey={Boolean(model && apiKey.trim())}
+        onOpenModelSettings={onOpenModelSettings}
+        modelError={modelError}
       />
     </section>
   );

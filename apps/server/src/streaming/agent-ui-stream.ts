@@ -11,6 +11,13 @@ export interface ToolActivity {
   state: 'input-streaming' | 'input-available' | 'output-available' | 'error';
 }
 
+/**
+ * 自定义的 data-* 流数据类型：渲染进程用 useChat 接收时，会按这些名称得到类型化的 data part。
+ *  - asset：生成出的待审批 3D 资产
+ *  - activity：工具调用进度
+ *  - turn：本轮的 clientTurnId，用于失败重试时去重
+ *  - preference：Agent 建议保存的偏好，需用户确认
+ */
 export interface ChatDataParts extends Record<string, unknown> {
   asset: AssetArtifact;
   activity: ToolActivity;
@@ -21,12 +28,14 @@ export interface ChatDataParts extends Record<string, unknown> {
 export type ChatUIMessage = UIMessage<undefined, ChatDataParts>;
 export type ChatUIMessageChunk = UIMessageChunk<undefined, ChatDataParts>;
 
+/** 一次转换的结果：发给渲染进程的 chunk、要写入历史记录的片段，以及累积用的文本增量。 */
 export interface AdaptedAgentChunk {
   uiChunk: ChatUIMessageChunk | null;
   persistedPart: PersistedMessagePart | null;
   textDelta?: string;
 }
 
+// Mastra 会产生很多内部工具，这里只把用户关心的四个业务工具展示为“活动”，其余忽略
 const knownTools = new Set([
   'analyze-input',
   'build-asset-brief',
@@ -51,7 +60,9 @@ function activityChunk(
 }
 
 /**
- * Maps only user-safe content from a Mastra UI chunk into renderer and history formats.
+ * 把 Mastra 返回的 UI chunk 转成“渲染进程格式 + 历史记录格式”，只保留对用户安全的内容。
+ * 文本和推理过程原样透传；工具调用转为 data-activity，并用 toolNamesByCallId
+ * 记住 callId 对应的工具名（输出事件里不带工具名）。
  */
 export function adaptAgentChunk(
   chunk: UIMessageChunk,

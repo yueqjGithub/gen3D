@@ -10,6 +10,7 @@ export interface ConversationSidebarProps {
   onDelete(id: string): Promise<void>;
 }
 
+/** 侧栏只管理重命名表单的临时状态；会话列表及其增删改由 App 管理。 */
 export function ConversationSidebar({
   conversations,
   activeConversationId,
@@ -127,7 +128,6 @@ export function ConversationSidebar({
 
       <footer className="conversation-sidebar__footer">
         <span className="status-dot" aria-hidden="true" />
-        本地保存 · 仅此设备可见
       </footer>
     </aside>
   );

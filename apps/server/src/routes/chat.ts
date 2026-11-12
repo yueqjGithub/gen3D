@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
+import { getCookie } from 'hono/cookie';
 import {
   agentStructuredOutputSchema,
   agentServiceRequestSchema,
   chatMessageSchema,
+  modelConfigSchema,
   MAX_CONVERSATION_ATTACHMENTS,
   validateBlenderScript,
   type AgentOutput,
@@ -18,11 +20,12 @@ import {
   createUIMessageStreamResponse,
 } from 'ai';
 import { z } from 'zod';
-import type { AgentClient } from '../agent-client';
-import { AgentServiceUnavailableError } from '../agent-client';
-import type { ResolvedModelConfig } from '../config/model-resolver';
+import {
+  AgentServiceUnavailableError,
+  streamAgent,
+} from '../agent-client';
+import { providerCatalog } from '../config/provider-catalog';
 import { prepareConversationInput } from '../attachments/prepare-conversation-input';
-import { ProviderNotConfiguredError } from '../config/model-resolver';
 import type { AttachmentStore } from '../storage/attachments';
 import type { createArtifactRepository } from '../storage/artifacts';
 import type { createConversationRepository } from '../storage/conversations';
@@ -41,6 +44,8 @@ type ConversationRepository = ReturnType<typeof createConversationRepository>;
 type ArtifactRepository = ReturnType<typeof createArtifactRepository>;
 type SettingsRepository = ReturnType<typeof createSettingsRepository>;
 
+// 以下 schema 校验渲染进程提交的请求体。useChat 会把整段消息历史一起发来，
+// 但服务端只使用最后一条用户消息，历史以数据库为准，避免客户端伪造历史。
 const textPartSchema = z.object({
   type: z.literal('text'),
   text: z.string().max(8000),
@@ -64,11 +69,15 @@ const submittedMessageSchema = z.object({
   role: z.enum(['system', 'user', 'assistant']),
   parts: z.array(z.unknown()).max(100),
 });
+// 聊天请求：clientTurnId 由前端为每一轮生成，重试同一轮时保持不变，服务端据此做幂等（见 beginTurn）
 const chatRequestSchema = z.object({
   conversationId: z.uuid(),
   clientTurnId: z.uuid(),
-  messages: z.array(submittedMessageSchema).min(1).max(100),
+  // 只接收本轮用户消息；历史消息由服务端从数据库读取
+  messages: z.array(submittedMessageSchema).length(1),
   attachmentIds: z.array(z.uuid()).max(MAX_CONVERSATION_ATTACHMENTS),
+  model: modelConfigSchema,
+  apiKey: z.string().trim().min(1).max(4096),
 }).strict();
 
 export interface ChatRouteDependencies {
@@ -77,16 +86,22 @@ export interface ChatRouteDependencies {
   attachments: AttachmentStore;
   preferences: PreferenceRepository;
   settings: SettingsRepository;
-  resolveModel(selection: ModelConfig, role: 'chat'): Promise<ResolvedModelConfig>;
-  agentClient: AgentClient;
 }
 
+/** 取出一条消息中所有文本片段并拼接（历史消息里的附件、推理等片段不会发给 Agent）。 */
 function messageText(message: ChatMessage): string {
   return message.parts
     .flatMap((part) => part.type === 'text' ? [part.text] : [])
     .join('\n');
 }
 
+/**
+ * 解析并校验用户本轮提交的消息：
+ *  - 最后一条必须是用户消息
+ *  - 附件引用必须属于当前会话，且文件名、类型与数据库记录一致
+ *  - 文本和附件不能同时为空
+ * 返回纯文本（发给 Agent）和要持久化的消息片段。
+ */
 function readSubmittedTurn(
   messages: z.infer<typeof submittedMessageSchema>[],
   attachmentIds: string[],
@@ -174,6 +189,10 @@ function readSubmittedTurn(
   return { text, userParts };
 }
 
+/**
+ * 构造发给 Agent 的消息列表：取最近 39 条已完成的历史消息，再加上本轮用户输入。
+ * 失败后重试时，数据库里已存在本轮的用户消息，需要排除，避免重复。
+ */
 function toAgentMessages(
   history: ChatMessage[],
   currentText: string,
@@ -196,6 +215,46 @@ function toAgentMessages(
   ];
 }
 
+/**
+ * 从流式到达的、可能不完整的结构化输出 JSON 中，取出目前已收到的 reply（聊天）或 brief（资产）字符串。
+ * 只提取这一个字段，Blender 脚本等其它字段不会被展示。遇到不完整的转义序列时停在它之前，等下一个分片。
+ */
+function extractStreamedReply(json: string): string {
+  const key = /"(reply|brief)"\s*:\s*"/.exec(json);
+  if (!key) {
+    return '';
+  }
+  const escapes: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' };
+  let text = '';
+  for (let i = key.index + key[0].length; i < json.length; i++) {
+    const char = json[i];
+    if (char === '"') {
+      break;
+    }
+    if (char !== '\\') {
+      text += char;
+      continue;
+    }
+    const next = json[i + 1];
+    if (next === undefined) {
+      break;
+    }
+    if (next === 'u') {
+      const hex = json.slice(i + 2, i + 6);
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+        break;
+      }
+      text += String.fromCharCode(parseInt(hex, 16));
+      i += 5;
+    } else {
+      text += escapes[next] ?? next;
+      i += 1;
+    }
+  }
+  return text;
+}
+
+/** 把已保存的一个消息片段重新写成流数据，用于重放已完成的轮次。 */
 function appendStreamPart(
   writer: { write(part: ChatUIMessageChunk): void },
   part: PersistedMessagePart,
@@ -223,6 +282,10 @@ function appendStreamPart(
   }
 }
 
+/**
+ * 重试一个已经成功的 clientTurnId 时，不再调用模型，直接把保存的回复以流的形式重放。
+ * 这样网络抖动导致的重复提交不会产生重复的回复或资产。
+ */
 function replayCompletedTurn(
   turn: ChatMessage,
   clientTurnId: string,
@@ -246,7 +309,8 @@ function replayCompletedTurn(
   return createUIMessageStreamResponse({ stream });
 }
 
-function safeStreamError(error: unknown): { message: string; code: 'STREAM_FAILED'; retryable: true } {
+/** 把流式过程中的异常转成可以展示给用户的提示；已知错误给出具体原因，其余用通用文案。 */
+function safeStreamError(error: unknown): { message: string; code: 'STREAM_FAILED'; retryable: boolean } {
   if (error instanceof AgentServiceUnavailableError) {
     return {
       message: 'The Agent service is unavailable. Retry the request.',
@@ -254,7 +318,7 @@ function safeStreamError(error: unknown): { message: string; code: 'STREAM_FAILE
       retryable: true,
     };
   }
-  if (error instanceof ProviderNotConfiguredError || error instanceof HttpError) {
+  if (error instanceof HttpError) {
     return { message: error.message, code: 'STREAM_FAILED', retryable: true };
   }
   return {
@@ -264,49 +328,26 @@ function safeStreamError(error: unknown): { message: string; code: 'STREAM_FAILE
   };
 }
 
-function logModelRequestFailure(
-  error: unknown,
-  model: ResolvedModelConfig,
-  phase: 'start' | 'stream',
-): void {
-  const details: {
-    providerId: string;
-    modelId: string;
-    phase: 'start' | 'stream';
-    errorName: string;
-    statusCode?: number;
-  } = {
-    providerId: model.providerId,
-    modelId: model.modelId,
-    phase,
-    errorName: error instanceof Error ? error.name : 'unknown error',
-  };
-  if (
-    typeof error === 'object'
-    && error !== null
-    && 'statusCode' in error
-    && typeof error.statusCode === 'number'
-  ) {
-    details.statusCode = error.statusCode;
-  }
-  console.error('Chat model request failed:', details);
-}
-
+/**
+ * 聊天路由：POST /api/chat。完整流程：
+ *  1. 校验请求，确认会话存在
+ *  2. 幂等检查：同一 clientTurnId 已完成则重放，正在运行则返回冲突
+ *  3. 读取当前选择的对话模型，准备附件（文档文本 / 图片）
+ *  4. 记录本轮开始（beginTurn），调用 Agent 并把流转发给渲染进程
+ *  5. 流结束后保存助手消息；失败则记录失败状态，允许用户重试
+ */
 export function createChatRoutes(dependencies: ChatRouteDependencies) {
   const {
     conversations,
     artifacts,
     attachments,
     preferences,
-    settings,
-    resolveModel,
-    agentClient,
   } = dependencies;
   const routes = new Hono();
 
   routes.post('/chat', async (context) => {
     const body = chatRequestSchema.parse(await context.req.json());
-    const conversation = conversations.get(body.conversationId);
+    const conversation = conversations.get(body.conversationId, getCookie(context, 'username')!);
     if (!conversation) {
       throw new HttpError(404, 'NOT_FOUND', 'The requested conversation does not exist.');
     }
@@ -325,6 +366,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       status: 'complete',
     });
 
+    // 幂等：已完成的轮次直接重放；仍在运行的轮次拒绝重复提交
     const existing = conversations.getTurn(conversation.id, body.clientTurnId);
     if (existing?.state === 'complete') {
       const replay = conversations.beginTurn(conversation.id, body.clientTurnId, userMessage);
@@ -337,17 +379,29 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       throw new ChatTurnConflictError(body.clientTurnId);
     }
 
-    const selection = await settings.getModelSelection();
-    const resolved = await resolveModel(selection.chat, 'chat');
+    // 每次请求携带当前选择和密钥，服务端只转发，不保存密钥。
+    const selectedModel = body.model;
+    const provider = Object.values(providerCatalog)
+      .find(({ id }) => id === selectedModel.providerId);
+    if (!provider?.models.chat.includes(selectedModel.modelId)) {
+      throw new HttpError(400, 'PROVIDER_ERROR', 'The selected provider or model is not supported.');
+    }
+    const model: ModelConfig = {
+      providerId: selectedModel.providerId,
+      modelId: selectedModel.modelId,
+      baseURL: new URL(selectedModel.baseURL).toString().replace(/\/$/, ''),
+    };
     const preparedInput = await prepareConversationInput(
       attachments,
       conversation.id,
       body.attachmentIds,
-      resolved.supportsInlineImages,
+      provider.supportsInlineImages,
     );
+    // 汇总一次 Agent 请求需要的全部上下文：模型、历史消息、附件内容和用户偏好
     const history = conversations.listMessages(conversation.id);
     const agentRequest = agentServiceRequestSchema.parse({
-      model: resolved,
+      model,
+      apiKey: body.apiKey,
       messages: toAgentMessages(
         history,
         input.text,
@@ -355,9 +409,10 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       ),
       documents: preparedInput.documents,
       images: preparedInput.images,
-      preferences: Object.entries(preferences.list()).map(([key, value]) => ({ key, value })),
+      preferences: Object.entries(preferences.list(getCookie(context, 'username')!)).map(([key, value]) => ({ key, value })),
     });
 
+    // 在真正调用模型前把本轮标记为 running（并保存用户消息），崩溃后可据此重试
     const turn = conversations.beginTurn(conversation.id, body.clientTurnId, userMessage);
     if (turn.state === 'complete' && turn.assistantMessage) {
       return replayCompletedTurn(turn.assistantMessage, body.clientTurnId, artifacts);
@@ -367,146 +422,62 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     }
 
     const assistantMessageId = turn.assistantMessage?.id ?? randomUUID();
+    // createUIMessageStream 返回 AI SDK 的 UI 消息流，渲染进程的 useChat 直接消费它
     const stream = createUIMessageStream<ChatUIMessage>({
       execute: async ({ writer }) => {
         writer.write({ type: 'start', messageId: assistantMessageId });
+        // 先告知前端本轮的 clientTurnId，便于它在失败后用同一个 id 重试
         writer.write({ type: 'data-turn', data: { clientTurnId: body.clientTurnId } });
         const persistedParts: PersistedMessagePart[] = [];
-        let streamedText = '';
         let output: AgentOutput | undefined;
-        let structuredOutputCount = 0;
+        let rawOutput = '';
+        let streamedReply = '';
+        let replyStarted = false;
         const toolNamesByCallId = new Map<string, string>();
 
         try {
-          for await (const chunk of agentClient.stream(agentRequest, {
-            signal: context.req.raw.signal,
-          })) {
+          for await (const chunk of streamAgent(agentRequest, context.req.raw.signal)) {
             if (context.req.raw.signal.aborted) {
               throw new DOMException('Request aborted.', 'AbortError');
             }
-            if (chunk.type === 'data-structured-output') {
-              structuredOutputCount += 1;
-              if (structuredOutputCount > 1) {
-                throw new Error('The Agent service returned duplicate structured output.');
+            // AI SDK 原生事件直接交给 useChat，不提取 JSON、不重写工具事件。
+            // 下面的读取仅用于保存历史和创建待审批资产，不改变转发的数据。
+            if (chunk.type === 'abort') throw new Error('Agent aborted the request.');
+            if (chunk.type !== 'start' && chunk.type !== 'finish') writer.write(chunk as ChatUIMessageChunk);
+            if (chunk.type === 'text-delta') streamedReply += chunk.delta;
+            if (chunk.type === 'reasoning-delta') persistedParts.push({ type: 'reasoning', text: chunk.delta });
+            if (chunk.type === 'tool-input-available') toolNamesByCallId.set(chunk.toolCallId, chunk.toolName);
+            if (chunk.type === 'tool-output-available' && toolNamesByCallId.get(chunk.toolCallId) === 'generate-blender-script') {
+              const result = chunk.output as { script?: string; validation?: string };
+              if (result?.validation === 'passed' && typeof result.script === 'string') {
+                output = { type: 'asset', brief: input.text.slice(0, 4000), script: result.script, blenderVersion: '4.x', preferenceProposals: [] };
               }
-              const data = chunk.data;
-              const object = (
-                typeof data === 'object'
-                && data !== null
-                && 'object' in data
-              ) ? data.object : undefined;
-              const parsedOutput = agentStructuredOutputSchema.safeParse(object);
-              if (!parsedOutput.success) {
-                throw new Error('The Agent service returned invalid structured output.');
-              }
-              output = parsedOutput.data.result;
-              continue;
-            }
-            if (
-              structuredOutputCount > 0
-              && chunk.type !== 'finish-step'
-              && chunk.type !== 'finish'
-            ) {
-              throw new Error('The Agent service returned content after its final structured output.');
-            }
-            if (chunk.type === 'error') {
-              throw new Error('The Agent service could not complete the request.');
-            }
-            if (chunk.type === 'abort') {
-              throw new Error('The Agent service aborted the request.');
-            }
-            const adapted = adaptAgentChunk(chunk, toolNamesByCallId);
-            if (adapted.uiChunk) {
-              writer.write(adapted.uiChunk);
-            }
-            if (adapted.textDelta) {
-              streamedText += adapted.textDelta;
-            }
-            if (adapted.persistedPart) {
-              persistedParts.push(adapted.persistedPart);
             }
           }
-          if (context.req.raw.signal.aborted) {
-            throw new DOMException('Request aborted.', 'AbortError');
-          }
-          if (!output) {
-            throw new Error('The Agent service did not return a result.');
-          }
-          const assetOutput = output.type === 'asset' ? output : null;
-          if (assetOutput && !validateBlenderScript(assetOutput.script).ok) {
-            throw new Error('The Agent service returned a script that failed validation.');
-          }
-          const replyText = streamedText.trim()
-            || (assetOutput ? assetOutput.brief : output.type === 'chat' ? output.reply : '');
-          const resultParts: PersistedMessagePart[] = [];
-
-          if (assetOutput) {
-            const artifact = artifacts.createPending({
-              conversationId: conversation.id,
-              brief: assetOutput.brief,
-              script: assetOutput.script,
-            });
+          if (output?.type === 'asset' && validateBlenderScript(output.script).ok) {
+            const artifact = artifacts.createPending({ conversationId: conversation.id, brief: output.brief, script: output.script });
             writer.write({ type: 'data-asset', id: artifact.id, data: artifact });
-            for (const proposal of assetOutput.preferenceProposals) {
-              writer.write({ type: 'data-preference', data: proposal });
-              resultParts.push({ type: 'preference-proposal', proposal });
-            }
-            resultParts.unshift({ type: 'asset', artifactId: artifact.id });
+            persistedParts.push({ type: 'asset', artifactId: artifact.id });
           }
-
-          if (!streamedText.trim()) {
-            writer.write({ type: 'text-start', id: 'agent-reply' });
-            writer.write({ type: 'text-delta', id: 'agent-reply', delta: replyText });
-            writer.write({ type: 'text-end', id: 'agent-reply' });
-          }
-          const assistantMessage = chatMessageSchema.parse({
-            id: assistantMessageId,
-            conversationId: conversation.id,
-            role: 'assistant',
-            parts: [
-              { type: 'text', text: replyText },
-              ...persistedParts,
-              ...resultParts,
-            ],
-            createdAt: new Date().toISOString(),
-            status: 'complete',
+          conversations.completeTurn(conversation.id, body.clientTurnId, {
+            id: assistantMessageId, conversationId: conversation.id, role: 'assistant',
+            parts: [{ type: 'text', text: streamedReply }, ...persistedParts],
+            createdAt: new Date().toISOString(), status: 'complete',
           });
-          conversations.completeTurn(conversation.id, body.clientTurnId, assistantMessage);
           writer.write({ type: 'finish', finishReason: 'stop' });
-          writer.setOutcome({ status: 'completed' });
         } catch (error) {
-          const aborted = context.req.raw.signal.aborted
-            || (error instanceof DOMException && error.name === 'AbortError');
-          const safeError = aborted
-            ? { message: 'Generation cancelled. Retry when you are ready.' }
-            : safeStreamError(error);
-
-          if (!aborted) {
-            logModelRequestFailure(error, resolved, 'stream');
-          }
-
+          const failure = safeStreamError(error);
           conversations.failTurn(conversation.id, body.clientTurnId, {
-            id: assistantMessageId,
-            conversationId: conversation.id,
-            role: 'assistant',
-            parts: [{ type: 'text', text: safeError.message }],
-            createdAt: new Date().toISOString(),
-            status: 'error',
+            id: assistantMessageId, conversationId: conversation.id, role: 'assistant',
+            parts: [{ type: 'text', text: failure.message }], createdAt: new Date().toISOString(), status: 'error',
           });
-
-          if (aborted) {
-            writer.setOutcome({ status: 'aborted' });
-          } else {
-            writer.write({ type: 'error', errorText: safeError.message });
-            writer.setOutcome({ status: 'failed', error });
-          }
+          writer.write({ type: 'error', errorText: failure.message });
         }
       },
       onError: () => 'The model request failed. Check your model settings and retry.',
     });
-
     return createUIMessageStreamResponse({ stream });
   });
-
   return routes;
 }
+

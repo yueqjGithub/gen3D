@@ -1,20 +1,21 @@
 import { useEffect, useState } from 'react';
 import type { AssetArtifact } from '@agent3d/shared';
-import type { ApiClient } from '../../api/client';
+import { api } from '../../api/client';
 import type { ScriptValidation } from '../../api/types';
 
 export interface AssetPanelProps {
-  api: ApiClient;
   artifact: AssetArtifact;
   onChange(artifact: AssetArtifact): void;
 }
 
-export function AssetPanel({ api, artifact, onChange }: AssetPanelProps) {
+/** 编辑、校验和审批生成的 Blender 脚本；脚本不会在桌面端执行。 */
+export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
   const [script, setScript] = useState(artifact.script);
   const [validation, setValidation] = useState<ScriptValidation | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 资产或版本变化时重新读取服务端校验结果，忽略旧请求的迟到响应。
   useEffect(() => {
     let active = true;
     setScript(artifact.script);
@@ -34,8 +35,9 @@ export function AssetPanel({ api, artifact, onChange }: AssetPanelProps) {
     return () => {
       active = false;
     };
-  }, [api, artifact.id, artifact.version]);
+  }, [artifact.id, artifact.version]);
 
+  // 提交当前版本号；服务端用它检测并发修改，避免覆盖较新的脚本。
   async function saveScript() {
     setBusy(true);
     setError(null);
@@ -84,6 +86,7 @@ export function AssetPanel({ api, artifact, onChange }: AssetPanelProps) {
     }
   }
 
+  // 必须先保存修改并通过静态检查，才能批准；只有批准后的脚本可以下载。
   const hasChanges = script !== artifact.script;
   const canApprove = artifact.status === 'pending' && !hasChanges && validation?.ok === true;
 

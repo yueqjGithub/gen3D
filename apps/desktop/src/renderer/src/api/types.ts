@@ -4,6 +4,7 @@ import type {
   PreferenceProposal,
 } from '@agent3d/shared';
 
+// ChatDataParts 描述服务端在 AI SDK 消息流中发送的自定义 data-* 数据。
 export interface ToolActivity {
   toolCallId: string;
   toolName: string;
@@ -18,6 +19,7 @@ export type ChatDataParts = {
   attachment: { id: string; fileName: string; mediaType: string };
 };
 
+// 历史消息的保存状态放在 metadata；实时流消息不一定包含该字段。
 export interface ChatMessageMetadata {
   persistedStatus?: 'complete' | 'error';
 }

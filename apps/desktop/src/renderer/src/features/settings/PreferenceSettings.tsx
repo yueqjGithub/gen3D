@@ -1,21 +1,15 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { ApiClient } from '../../api/client';
+import { api } from '../../api/client';
 
-export interface PreferenceSettingsProps {
-  api: ApiClient;
-}
-
-export function PreferenceSettings({ api }: PreferenceSettingsProps) {
+/** 管理已确认的用户偏好；Agent 提议不会自动写入。 */
+export function PreferenceSettings() {
   const [preferences, setPreferences] = useState<Record<string, string>>({});
   const [key, setKey] = useState('');
   const [value, setValue] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function refresh() {
-    setPreferences(await api.getPreferences());
-  }
-
+  // 组件卸载后忽略未完成的请求结果。
   useEffect(() => {
     let active = true;
     void api.getPreferences()
@@ -32,7 +26,7 @@ export function PreferenceSettings({ api }: PreferenceSettingsProps) {
     return () => {
       active = false;
     };
-  }, [api]);
+  }, []);
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -54,7 +48,7 @@ export function PreferenceSettings({ api }: PreferenceSettingsProps) {
     setError(null);
     try {
       await api.deletePreference(preferenceKey);
-      await refresh();
+      setPreferences(await api.getPreferences());
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : '偏好删除失败。');
     } finally {

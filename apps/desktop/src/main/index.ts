@@ -1,63 +1,17 @@
-import { app, BrowserWindow, dialog, Menu, safeStorage } from 'electron';
-import { join, resolve } from 'node:path';
+import { app, BrowserWindow, dialog, Menu, type MenuItemConstructorOptions } from 'electron';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  assertDataDirectoryMatches,
-  resolveDataDirectory,
-} from '../../../server/src/config/data-directory.js';
-import { createSafeStorageCredentialStore } from './credentials.js';
-import { startCredentialBroker } from './credential-broker.js';
-import { createApplicationMenuTemplate } from './devtools.js';
-import {
-  createRendererArguments,
-  readRendererServerConfig,
-} from './renderer-arguments.js';
-import { createWindowOwner } from './window-owner.js';
+import debug from 'electron-debug'
+
+if (!app.isPackaged) {
+  debug();
+}
 
 const appRoot = fileURLToPath(new URL('.', import.meta.url));
-const mainWindowOwner = createWindowOwner<BrowserWindow>();
+let mainWindow: BrowserWindow | null = null;
 
-function readCredentialBrokerConfig(source: Record<string, string | undefined>) {
-  const port = source.AGENT3D_CREDENTIAL_BROKER_PORT === undefined
-    ? 62588
-    : Number(source.AGENT3D_CREDENTIAL_BROKER_PORT.trim());
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new TypeError('AGENT3D_CREDENTIAL_BROKER_PORT must be a valid TCP port.');
-  }
-  const token = source.AGENT3D_CREDENTIAL_BROKER_TOKEN?.trim();
-  if (!token) {
-    throw new TypeError('AGENT3D_CREDENTIAL_BROKER_TOKEN must be configured.');
-  }
-  return { port, token };
-}
-
-function registerCredentialBrokerShutdown(
-  close: () => Promise<void>,
-  quit: () => void,
-): void {
-  let stopping = false;
-  let finished = false;
-  app.on('before-quit', (event) => {
-    if (finished) {
-      return;
-    }
-    event.preventDefault();
-    if (stopping) {
-      return;
-    }
-    stopping = true;
-    void close().then(() => {
-      finished = true;
-      quit();
-    }).catch((error: unknown) => {
-      console.error('Failed to close the credential broker cleanly.', error);
-      finished = true;
-      quit();
-    });
-  });
-}
-
-function createWindow(apiBaseUrl: string, apiToken: string): void {
+// Electron 主进程只管理窗口；React 界面和 Hono API 分别运行在独立进程中。
+function createWindow(): void {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -65,16 +19,24 @@ function createWindow(apiBaseUrl: string, apiToken: string): void {
     minHeight: 640,
     backgroundColor: '#f5f4f1',
     webPreferences: {
-      preload: resolve(appRoot, '../preload/index.cjs'),
+      // 页面不直接使用 Node API，也没有 preload 桥接；界面通过 HTTP 访问本地 Hono。
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       devTools: !app.isPackaged,
-      additionalArguments: createRendererArguments(apiBaseUrl, apiToken),
     },
   });
-  mainWindowOwner.retain(window);
+  mainWindow = window;
+  mainWindow.once('ready-to-show', () => {
+    mainWindow?.webContents.openDevTools()
+  })
+  window.on('closed', () => {
+    if (mainWindow === window) {
+      mainWindow = null;
+    }
+  });
 
+  // 开发时加载 Vite 地址，打包后加载构建出的本地 HTML。
   if (process.env.ELECTRON_RENDERER_URL) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
@@ -82,65 +44,43 @@ function createWindow(apiBaseUrl: string, apiToken: string): void {
   }
 }
 
-async function startDesktopApplication(): Promise<void> {
-  const menuTemplate = createApplicationMenuTemplate(app.isPackaged, () => {
-    const window = mainWindowOwner.current;
-    if (!window) {
-      return;
-    }
-    if (window.webContents.isDevToolsOpened()) {
-      window.webContents.closeDevTools();
-    } else {
-      window.webContents.openDevTools({ mode: 'detach' });
-    }
-  });
-  Menu.setApplicationMenu(menuTemplate ? Menu.buildFromTemplate(menuTemplate) : null);
+// 等待 Electron 初始化后创建菜单和窗口；开发版 F12 可切换开发者工具。
+app.whenReady().then(() => {
+  const menu: MenuItemConstructorOptions[] = [{
+    label: '查看',
+    submenu: [{
+      label: '开发者工具',
+      accelerator: 'F12',
+      click: () => {
+        if (!mainWindow) {
+          return;
+        }
+        if (mainWindow.webContents.isDevToolsOpened()) {
+          mainWindow.webContents.closeDevTools();
+        } else {
+          mainWindow.webContents.openDevTools({ mode: 'detach' });
+        }
+      },
+    }],
+  }];
+  Menu.setApplicationMenu(app.isPackaged ? null : Menu.buildFromTemplate(menu));
 
-  const rendererServer = readRendererServerConfig();
-  const credentialBrokerConfig = readCredentialBrokerConfig(process.env);
-  const configuredUserDataDirectory = resolveDataDirectory(
-    process.env,
-    process.platform,
-    app.getPath('home'),
-    app.getName(),
-  );
-  if (process.env.AGENT3D_DATA_DIR?.trim()) {
-    app.setPath('userData', configuredUserDataDirectory);
-  }
-  const userDataDirectory = app.getPath('userData');
-  assertDataDirectoryMatches(configuredUserDataDirectory, userDataDirectory);
-  const secureCredentials = createSafeStorageCredentialStore(safeStorage, userDataDirectory);
-  const credentialBroker = await startCredentialBroker({
-    store: secureCredentials,
-    token: credentialBrokerConfig.token,
-    port: credentialBrokerConfig.port,
-  });
-  if (!app.isPackaged) {
-    console.info('Credential broker listening at', credentialBroker.baseURL);
-  }
-  registerCredentialBrokerShutdown(() => credentialBroker.close(), () => app.quit());
-
-  createWindow(
-    rendererServer.serverUrl,
-    rendererServer.serverToken,
-  );
-
+  createWindow();
   app.on('activate', () => {
-    if (mainWindowOwner.current === null) {
-      createWindow(rendererServer.serverUrl, rendererServer.serverToken);
+    if (mainWindow === null) {
+      createWindow();
     }
   });
-}
-
-app.whenReady().then(startDesktopApplication).catch((error: unknown) => {
+}).catch((error: unknown) => {
   console.error('Failed to start the desktop application.', error);
   dialog.showErrorBox(
     '应用启动失败',
-    '桌面应用未能启动。请检查本地数据目录和运行时配置后重试。',
+    '桌面应用未能启动。请检查运行时配置后重试。',
   );
   app.quit();
 });
 
+// macOS 习惯保留应用进程；其他系统关闭最后一个窗口时退出。
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();

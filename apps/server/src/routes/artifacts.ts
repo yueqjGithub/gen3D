@@ -10,14 +10,20 @@ import { HttpError } from '../http-errors';
 
 type ArtifactRepository = ReturnType<typeof createArtifactRepository>;
 
+// 编辑资产时需要带上 expectedVersion（乐观锁）：如果版本已变化，说明别处修改过，更新会被拒绝
 const editArtifactSchema = z.object({
   expectedVersion: z.number().int().positive(),
   script: assetArtifactSchema.shape.script,
 }).strict();
 
+/**
+ * 3D 资产（Blender 脚本）的审批流程，对应 Human-in-the-loop：
+ * Agent 生成的资产状态为 pending → 用户可编辑脚本 → 批准(approved) 或 拒绝(rejected) → 只有批准后才能下载。
+ */
 export function createArtifactRoutes(artifacts: ArtifactRepository) {
   const routes = new Hono();
 
+  // 读取资产，同时返回脚本的静态校验结果，界面据此提示用户脚本是否安全
   routes.get('/artifacts/:id', (context) => {
     const artifact = artifacts.get(context.req.param('id'));
     if (!artifact) {
@@ -42,6 +48,7 @@ export function createArtifactRoutes(artifacts: ArtifactRepository) {
     });
   });
 
+  // 批准前必须再次通过脚本校验，避免用户编辑后批准了不合规的脚本
   routes.post('/artifacts/:id/approve', async (context) => {
     const { expectedVersion } = artifactApprovalSchema.parse(await context.req.json());
     const current = artifacts.get(context.req.param('id'));
@@ -68,6 +75,7 @@ export function createArtifactRoutes(artifacts: ArtifactRepository) {
     });
   });
 
+  // 下载：只有已批准的资产才能下载，以 .py 文件形式返回，用户自行在 Blender 里运行
   routes.get('/artifacts/:id/download', (context) => {
     const artifact = artifacts.get(context.req.param('id'));
     if (!artifact) {

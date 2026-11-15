@@ -494,15 +494,6 @@ summary:focus-visible {
     }
   }
 
-  &__stop {
-    align-self: center;
-    margin: 0 0 10px;
-    border: 1px solid #d5d7cf;
-    border-radius: 4px;
-    background: #fff;
-    color: #555b53;
-    padding: 6px 12px;
-  }
 }
 
 .chat-message {
@@ -576,6 +567,37 @@ summary:focus-visible {
     gap: 8px;
     color: #6a7167;
     font-size: 11px;
+  }
+
+  // 约束图片自身的尺寸。宽图随气泡收缩，长图按比例缩小，文件名始终在下一行。
+  img {
+    display: block;
+    max-width: min(100%, 440px);
+    max-height: 320px;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 6px;
+  }
+
+  &__image {
+    margin: 0;
+    min-width: 0;
+
+    figcaption {
+      margin-top: 5px;
+      color: #697069;
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+  }
+
+  &__tool {
+    color: #686e68;
+    font-size: 12px;
+    line-height: 1.5;
+    summary { cursor: pointer; }
+    pre { margin: 6px 0 0; font-size: inherit; }
   }
 
   &__attachment {
@@ -684,6 +706,12 @@ summary:focus-visible {
   background: #fff;
   box-shadow: 0 4px 18px #2931260d;
 
+  &--dragging {
+    outline: 2px dashed #526c57;
+    outline-offset: -2px;
+    background: #f2f6f1;
+  }
+
   textarea {
     width: 100%;
     min-height: 66px;
@@ -747,10 +775,21 @@ summary:focus-visible {
   }
 
   &__send {
-    min-width: 72px;
-    min-height: 33px;
-    padding: 0 10px;
-    font-size: 11px;
+    display: grid;
+    place-items: center;
+    flex: 0 0 34px;
+    height: 34px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  &__stop-icon {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    background: currentColor;
   }
 
   &__attachments {
@@ -762,19 +801,54 @@ summary:focus-visible {
     list-style: none;
 
     li {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      padding: 5px 8px;
+      position: relative;
+      display: grid;
+      align-content: start;
+      gap: 4px;
+      width: 108px;
+      max-width: 100%;
+      min-width: 0;
+      padding: 6px;
       border: 1px solid #e5e6e0;
       border-radius: 4px;
       color: #575e55;
       font-size: 10px;
     }
 
+    img {
+      display: block;
+      width: 100%;
+      height: 64px;
+      object-fit: contain;
+      background: #f3f4f0;
+      border-radius: 3px;
+    }
+
     small {
       color: #8d9288;
     }
+  }
+
+  &__filename {
+    padding-right: 22px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid #d8dcd3;
+    border-radius: 50%;
+    background: #fff;
+    color: #475348;
+    font-size: 15px;
+    line-height: 1;
   }
 
   &__upload-status {
@@ -1323,3 +1397,23 @@ summary:focus-visible {
     }
   }
 }
+.message-parts__text {
+  p { margin: 0 0 0.75rem; }
+  pre { max-width: 100%; overflow-x: auto; padding: 1rem; border-radius: 8px; background: #151922; color: #e5e7eb; white-space: pre-wrap; overflow-wrap: anywhere; }
+  code { font-family: Consolas, monospace; }
+}
+/* Grid/Flex 子项默认 min-width:auto 会被长代码撑开，逐层允许收缩。 */
+.chat-view, .chat-view__messages, .chat-message, .message-parts, .message-parts > *, .asset-panel { min-width: 0; max-width: 100%; }
+.message-parts { grid-template-columns: minmax(0, 1fr); }
+.message-parts p, .message-parts summary { overflow-wrap: anywhere; }
+.message-parts pre { min-width: 0; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.message-parts__loading, .chat-view__waiting { margin: 0; color: #687067; font-size: 12px; }
+.loading-dot { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: #839472; animation: thinking 1s ease-in-out infinite alternate; }
+@keyframes thinking { to { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .loading-dot { animation: none; } }
+.model-preview { width: 100%; height: 320px; overflow: hidden; border-radius: 10px; }
+.model-preview canvas { display: block; max-width: 100%; }
+.asset-panel { max-height: calc(100dvh - 58px); overflow-y: auto; }
+.asset-panel > * { flex-shrink: 0; }
+.asset-panel details summary { cursor: pointer; color: #687461; font-size: 12px; margin-bottom: 10px; }
+@media (max-width: 900px) { .asset-panel { max-height: none; } }

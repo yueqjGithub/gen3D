@@ -14,3 +14,7 @@ userData/
 apps/server/data/
 .superpowers/
 apps/desktop/out/
+
+# 本地验证产物：独立数据库、浏览器状态及截图
+.verification/
+.test-tmp/

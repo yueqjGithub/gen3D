@@ -1,26 +1,10 @@
+-- 只创建应用自己的登录表，不重建 Mastra 管理的 mastra_threads。
+-- 旧会话和 Studio 会话的 resourceId 不一定对应 users.username。
+-- 会话归属由业务查询按 resourceId 检查；不能在迁移时强加用户外键，
+-- 更不能 DROP 父表，否则可能级联删除消息、资产和附件。
 CREATE TABLE users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE,
   password TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
-CREATE TABLE mastra_threads_new (
-  "id" TEXT NOT NULL PRIMARY KEY,
-  "resourceId" TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
-  "title" TEXT NOT NULL,
-  "metadata" TEXT,
-  "createdAt" TEXT NOT NULL,
-  "updatedAt" TEXT NOT NULL
-);
-
-INSERT INTO mastra_threads_new
-  ("id", "resourceId", "title", "metadata", "createdAt", "updatedAt")
-SELECT
-  "id", "resourceId", "title", "metadata", "createdAt", "updatedAt"
-FROM mastra_threads;
-
-DROP TABLE mastra_threads;
-ALTER TABLE mastra_threads_new RENAME TO mastra_threads;
-
-PRAGMA foreign_key_check;

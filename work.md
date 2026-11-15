@@ -168,3 +168,53 @@ TODO 中提到重建数据库；操作任何数据库文件前应先确认路径
 ## 给接手 Agent 的建议
 
 先确认用户当前要继续的具体目标，不要顺手重构其他模块。开始改代码前查看相关实现、测试和工作区 diff；保持固定端口、Mastra 原生 chatRoute、Server 作为桌面端与 Agent 的中间层等既有约定。每个改动优先跑最小相关测试，再按需做类型检查和构建。涉及真实模型时由用户本地 Key 调用；不要在日志、文档、测试快照或答复中回显密钥。
+
+
+## 2026-11-12 通信与展示调整
+
+- Agent 使用普通文本流，不再配置 structuredOutput。工具参数仍由 Zod 声明，这是模型调用工具的必要描述，不用于重新包装聊天回复。
+- Server 保留 AI SDK 原生文本、文件、工具事件。工具和图片事件以 ui-chunk 容器原样保存；Desktop 使用 readUIMessageStream 恢复历史工具状态。
+- generate-blender-script 校验通过后的工具输出用于创建待审批资产；应用仍不执行 Blender。
+- Studio 恢复建模工具，普通回复、代码、工具输出可用原生 trace 检查。
+- Desktop 支持代码围栏（含尚未闭合的流式围栏）、Markdown 图片、原生 file 图片和工具输入/输出。用户上翻时停止自动滚到底部。
+- 验证：Agent 21 项、Server API 11 项、Desktop 原有 4 项和新增消息展示 2 项通过。Agent 类型检查通过。Server/Desktop 完整类型检查仍有原有测试断言类型等错误。
+- 尚未调用真实模型、运行 Blender 或在 Studio 界面确认 trace；不要把静态脚本校验当作 Blender 运行验证。
+
+
+## 2026-11-12 最终验证
+
+- pnpm typecheck 与 Agent 单独 tsc 均通过。之前的继承类型缺失来自受限执行环境对 pnpm 符号链接的解析；在正常权限下依赖与类型正常，无需改写业务 API 或屏蔽测试文件。
+- 根测试 79 项通过（smoke 7、shared 16、server 50、desktop 6）；Agent 22 项另行通过，共 101 项。
+- pnpm build 三个应用均构建成功。Electron 提示缺少 preload（工程未使用 preload）；Mastra 遥测证书提示不影响构建退出码。
+- 实际 Studio 和 Desktop 均调用 Agnes 生成树木 Blender Python 脚本。Studio trace 详情正常，包含 analyze-input、build-asset-brief、generate-blender-script 工具 span，无浏览器异常和失败接口。
+- Desktop 实际验证图片上传、图片加载、代码块、工具输入输出、待审阅资产，以及刷新后内容和顺序一致。图片预览接口校验会话归属，新增测试覆盖越权访问。
+- 验证输出 .verification/generated-tree.py；截图与独立验证数据库位于 .verification/，已忽略，不提交浏览器状态或验证数据。未安装、调用 Blender。
+- 本机 Node 默认信任库无法验证模型站点证书。真实验证通过在 PowerShell 中设置 $env:NODE_OPTIONS='--use-system-ca' 后启动 Agent 完成，没有关闭 TLS 校验。该环境设置仅作用于当前进程，不写入现有 .env。
+
+
+## 2026-11-12 Three.js 预览与消息布局
+
+- 默认生成 generate-three-scene 工具的 three-primitives-v1 场景数据，支持 box/sphere/cylinder/cone/torus，Y 轴朝上。ModelPreview.tsx 集中处理几何体、灯光、自动对焦、OrbitControls、尺寸变化和资源释放。
+- 资产仍复用现有表和 script 内容字段（新资产保存 JSON）；旧 Blender 脚本继续可读、审批和下载，不重建数据库。旧 blender_version 字段为兼容旧数据库保留，界面根据内容显示 THREE.JS 或 BLENDER。
+- 新资产可预览、旋转、缩放、编辑完整场景 JSON、审批并下载 .json。下载数据为本项目的基础几何体场景格式；如何转换为 Three.js Mesh 直接参考 ModelPreview.tsx，不是任意 HTML/JavaScript，也不是 GLB。
+- 修改模型时把上一轮工具输出作为普通历史上下文发送，并开放修改意图，避免生成斑点时丢失原模型。聊天 SSE 保持原生透传。
+- 修复 Grid/Flex min-width 导致的长文本和工具 JSON 横向溢出；代码块支持折行。submitted 阶段和空 assistant 消息分别显示连接提示/思考提示。
+- 实际浏览器验证：生成白色小狗 → 添加黑色斑点 → 预览画布正常 → 刷新场景一致。验证消息区 scrollWidth 不超过 clientWidth，无浏览器异常。截图在 .verification/three-dog.png 和 .verification/three-dalmatian.png。
+
+
+## 2026-11-12 脚本建模 → GLB（替代基础几何体 JSON 路线）
+
+- Agent 默认使用 generate-three-model，source 为 JS/TS 函数体，THREE 已注入，返回 Group/Mesh；支持自定义顶点、曲面、拉伸、旋转成型、CanvasTexture。
+- 实现集中于 apps/agent/src/mastra/tools/generate-three-model.ts：esbuild 转译与浏览器运行库打包；一次性 Chromium 页面禁止网络，无登录态，不暴露 Node；GLTFExporter 导出 GLB 至共享数据目录 models。执行错误返回给 Agent 修复，15 秒超时关闭浏览器。
+- 流中只返回 {format: three-script-v1, source, modelId} 的资产描述，不传输 GLB 二进制，不改变 AI SDK 原生事件。
+- Server 使用按会话鉴权的 /api/artifacts/:id/model 提供预览文件；批准后下载接口返回同一 GLB。不能单独编辑已执行脚本而继续引用旧文件，修改通过聊天重新执行生成。
+- Desktop 的 ModelPreview.tsx 使用 GLTFLoader，不执行脚本，支持 OrbitControls、自动对焦和资源释放。
+- 按用户明确要求清空现有资产：删除 1 条资产和 1 处消息资产引用，保留会话及普通消息。原数据库备份：.verification/before-clear-assets-1794494491881.sqlite。验证请求使用独立目录，未往已清空的实际资产库插入测试资产。
+- 实测：TypeScript 自定义旋转曲面导出有效 GLB；脚本错误反馈；无限循环超时中止；Node 环境不可访问；真实 Agent 生成花瓶 → Desktop GLB 预览 → 批准 → 下载 → 刷新恢复全部通过。示例模型 .verification/generated-vase.glb，截图 .verification/glb-vase.png。
+
+## Three.js 造型与材质
+
+- 建模工具额外注入 `sculpt`（相交体积融合成连续曲面）、`taper`（截面沿曲线变化）和 `THREE.RoundedBoxGeometry`（硬表面倒角）。工具输入仍然是一个 `source` 函数体，导出文件可直接交给 GLTFLoader。
+- 站姿短毛犬提供可读的程序化起点 `makeDog`，实现位于 `apps/agent/src/mastra/tools/dog-model.ts`。耳根和尾根是各部件的旋转中心；斑点用模型空间距离配合内嵌色带着色，变换观察角度时花纹随表面移动。
+- Desktop 在本地生成环境光贴图，对模型最低点设置接影面，并按面板宽高取景。照明与地面只用于审阅。
+- 用真实 Agent 生成了带红项圈的黑白斑点狗。将它给出的同一段脚本用最终工具导出，在 Desktop 的 ModelPreview 中检查了两个角度。示例为 `.verification/sculpt-dog.glb`，截图为 `.verification/sculpt-preview.png`。另行验证了通用曲面、变截面管和倒角机壳都能独立导出。

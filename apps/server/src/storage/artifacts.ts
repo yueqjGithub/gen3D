@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { readThreeModel } from '@agent3d/shared';
 import { randomUUID } from 'node:crypto';
 import { assetArtifactSchema, type AssetArtifact } from '@agent3d/shared';
 import type { SqliteDatabase } from './database';
@@ -85,6 +88,14 @@ export function createArtifactRepository(database: SqliteDatabase) {
     },
 
     get,
+    // 路径只使用经过 UUID 校验的 modelId；不接受请求传入任意文件路径。
+    async readModel(id: string): Promise<Uint8Array | null> {
+      const artifact = get(id);
+      const model = artifact && readThreeModel(artifact.script);
+      if (!model) return null;
+      try { return await readFile(join(dirname(database.name), 'models', model.modelId + '.glb')); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+    },
 
     /** 编辑待审批资产的脚本：只允许 pending 状态，版本号 +1。immediate() 让事务一开始就加写锁。 */
     updatePending(id: string, expectedVersion: number, script: string): AssetArtifact {

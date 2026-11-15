@@ -77,7 +77,13 @@ export async function createDatabase(path: string): Promise<DatabaseHandle> {
         .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(migration.version, new Date().toISOString());
     });
-    applyMigration.immediate();
+    try {
+      applyMigration.immediate();
+    } catch (error) {
+      // 事务已回滚；启动失败时也要关闭连接，方便修复后重新启动。
+      connection.close();
+      throw new Error('Database migration ' + migration.version + ' failed.', { cause: error });
+    }
   }
 
   // A process exit can interrupt streaming; leave those turns retryable after restart.

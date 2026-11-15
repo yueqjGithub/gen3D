@@ -48,7 +48,7 @@ describe('3D asset agent', () => {
       name: 'local-test',
       baseURL: 'http://localhost:1',
       fetch: async () => {
-        const content = JSON.stringify({ result: { type: 'chat', reply: '你好' } });
+        const content = '你好';
         const chunk = { id: 'test', object: 'chat.completion.chunk', created: 1, model: 'test',
           choices: [{ index: 0, delta: { content }, finish_reason: null }] };
         const end = { id: 'test', object: 'chat.completion.chunk', created: 1, model: 'test',
@@ -72,31 +72,18 @@ describe('3D asset agent', () => {
       });
       const chunks = [];
       for await (const chunk of result) chunks.push(chunk);
-      expect(chunks).toContainEqual({
-        type: 'data-structured-output',
-        data: { object: { result: { type: 'chat', reply: '你好' } } },
-      });
+      expect(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.delta).join('')).toBe('你好');
+      expect(chunks.some(chunk => chunk.type === 'data-structured-output')).toBe(false);
     } finally {
       agent.model = originalModel;
       await storage.close();
     }
   });
 
-  it('configures structured output for both conversation and asset generation', async () => {
-    const chat = await agent.getDefaultOptions({ requestContext: createRequestContext('你好') });
-    const asset = await agent.getDefaultOptions({
-      requestContext: createRequestContext('请帮我生成一个低多边形树木模型'),
-    });
-
-    expect(chat.structuredOutput).toBeDefined();
-    expect(asset.structuredOutput).toBeDefined();
-    expect(await chat.structuredOutput?.schema['~standard'].validate({ result: { type: 'chat', reply: '你好' } })).toHaveProperty('value');
-    expect(await chat.structuredOutput?.schema['~standard'].validate({
-      result: { type: 'asset', brief: '树木', script: 'import bpy', blenderVersion: '4.x', preferenceProposals: [] },
-    })).toHaveProperty('issues');
-    expect(await asset.structuredOutput?.schema['~standard'].validate({
-      result: { type: 'asset', brief: '树木', script: 'import bpy', blenderVersion: '4.x', preferenceProposals: [] },
-    })).toHaveProperty('value');
+  it('uses native text output with enough modeling steps', async () => {
+    const options = await agent.getDefaultOptions({ requestContext: createRequestContext('请生成树木模型') });
+    expect('structuredOutput' in options).toBe(false);
+    expect(options.maxSteps).toBe(8);
   });
 
   it('requires the API key from the current request', async () => {
@@ -118,21 +105,34 @@ describe('3D asset agent', () => {
     expect(model.modelId).toBe('claude-sonnet-4-5');
   });
 
-  it('exposes asset tools only for an explicit creation request', async () => {
+  it.each(['你好', '换成蓝色', '只保留本体', '把口沿加宽一点'])('keeps modeling tools available for follow-up messages: %s', async (text) => {
     const chatTools = await agent.listTools({
-      requestContext: createRequestContext('你好'),
+      requestContext: createRequestContext(text),
     });
     const assetTools = await agent.listTools({
       requestContext: createRequestContext('请帮我生成一个低多边形树木模型'),
     });
 
-    expect(Object.keys(chatTools)).toEqual(['analyze-input']);
+    expect(Object.keys(chatTools)).toEqual(Object.keys(assetTools));
     expect(Object.keys(assetTools)).toEqual([
       'analyze-input',
+      'generate-three-model',
       'build-asset-brief',
-      'generate-blender-script',
       'update-preferences',
     ]);
+  });
+
+  it('requires modeling on the first step of an explicit revision and allows automatic follow-up', async () => {
+    const requestContext = createRequestContext('换成红色，口沿再宽一点');
+    requestContext.set('hasExistingModel', true);
+    const options = await agent.getDefaultOptions({ requestContext });
+    const prepare = options.prepareStep as (input: { stepNumber: number }) => { toolChoice: unknown };
+    expect(prepare({ stepNumber: 0 }).toolChoice).toEqual({ type: 'tool', toolName: 'generate-three-model' });
+    expect(prepare({ stepNumber: 1 }).toolChoice).toBe('auto');
+    requestContext.set('agent3d', {
+      ...agentChatRequestContextSchema.parse(requestContext.get('agent3d')), latestUserText: '怎么修改颜色？',
+    });
+    expect((await agent.getDefaultOptions({ requestContext })).prepareStep).toBeUndefined();
   });
 
   it('reads documents and preferences from the current request context', async () => {
@@ -156,17 +156,4 @@ describe('3D asset agent', () => {
     });
   });
 
-  it('rejects unsafe Blender scripts', async () => {
-    const requestContext = createRequestContext('请帮我生成一个低多边形树木模型');
-    const tools: Record<string, unknown> = await agent.listTools({ requestContext });
-    const scriptTool = tools['generate-blender-script'];
-    if (typeof scriptTool !== 'object' || scriptTool === null
-      || !('execute' in scriptTool) || typeof scriptTool.execute !== 'function') {
-      throw new Error('The explicit asset request did not expose the Blender script tool.');
-    }
-
-    await expect(scriptTool.execute({
-      script: 'import bpy\nimport subprocess',
-    }, { requestContext })).rejects.toThrow('Blender script failed static validation');
-  });
 });

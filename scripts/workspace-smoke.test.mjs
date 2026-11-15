@@ -33,7 +33,7 @@ test('Mastra owns the fixed Agent port and reads provider keys from its local en
 
   assert.equal(packageJson.name, '@agent3d/agent');
   assert.deepEqual(Object.keys(packageJson.scripts).sort(), ['build', 'dev', 'start']);
-  assert.equal(packageJson.scripts.dev, 'pnpx dotenv run -f ../../.env mastra dev');
+  assert.equal(packageJson.scripts.dev, 'pnpm dotenv run -f ../../.env mastra dev');
   assert.equal(packageJson.devDependencies?.hono, undefined);
   assert.deepEqual(environmentExample.match(/^[A-Z_]+=.*$/gm), [
     'AGNES_API_KEY=',

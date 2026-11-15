@@ -2,12 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
 import {
-  agentStructuredOutputSchema,
   agentServiceRequestSchema,
   chatMessageSchema,
   modelConfigSchema,
   MAX_CONVERSATION_ATTACHMENTS,
-  validateBlenderScript,
+  validateAssetScript,
   type AgentOutput,
   type AgentServiceRequest,
   type ChatMessage,
@@ -32,7 +31,6 @@ import type { createConversationRepository } from '../storage/conversations';
 import { ChatTurnConflictError } from '../storage/conversations';
 import { HttpError } from '../http-errors';
 import {
-  adaptAgentChunk,
   type ChatDataParts,
   type ChatUIMessage,
   type ChatUIMessageChunk,
@@ -60,6 +58,7 @@ const attachmentReferenceSchema = z.object({
   type: z.literal('data-attachment'),
   data: z.object({
     id: z.uuid(),
+    url: z.string().optional(),
     fileName: z.string().min(1).max(255),
     mediaType: z.string().min(1).max(100),
   }).strict(),
@@ -91,7 +90,7 @@ export interface ChatRouteDependencies {
 /** 取出一条消息中所有文本片段并拼接（历史消息里的附件、推理等片段不会发给 Agent）。 */
 function messageText(message: ChatMessage): string {
   return message.parts
-    .flatMap((part) => part.type === 'text' ? [part.text] : [])
+    .flatMap((part) => part.type === 'text' ? [part.text] : part.type === 'ui-chunk' && part.chunk.type === 'tool-output-available' && typeof (part.chunk.output as { script?: string })?.script === 'string' ? ['上一版模型完整数据：' + (part.chunk.output as { script: string }).script] : [])
     .join('\n');
 }
 
@@ -215,52 +214,15 @@ function toAgentMessages(
   ];
 }
 
-/**
- * 从流式到达的、可能不完整的结构化输出 JSON 中，取出目前已收到的 reply（聊天）或 brief（资产）字符串。
- * 只提取这一个字段，Blender 脚本等其它字段不会被展示。遇到不完整的转义序列时停在它之前，等下一个分片。
- */
-function extractStreamedReply(json: string): string {
-  const key = /"(reply|brief)"\s*:\s*"/.exec(json);
-  if (!key) {
-    return '';
-  }
-  const escapes: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' };
-  let text = '';
-  for (let i = key.index + key[0].length; i < json.length; i++) {
-    const char = json[i];
-    if (char === '"') {
-      break;
-    }
-    if (char !== '\\') {
-      text += char;
-      continue;
-    }
-    const next = json[i + 1];
-    if (next === undefined) {
-      break;
-    }
-    if (next === 'u') {
-      const hex = json.slice(i + 2, i + 6);
-      if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
-        break;
-      }
-      text += String.fromCharCode(parseInt(hex, 16));
-      i += 5;
-    } else {
-      text += escapes[next] ?? next;
-      i += 1;
-    }
-  }
-  return text;
-}
-
 /** 把已保存的一个消息片段重新写成流数据，用于重放已完成的轮次。 */
 function appendStreamPart(
   writer: { write(part: ChatUIMessageChunk): void },
   part: PersistedMessagePart,
   artifact: ReturnType<ArtifactRepository['get']>,
 ): void {
-  if (part.type === 'text') {
+  if (part.type === 'ui-chunk') {
+    writer.write(part.chunk as unknown as ChatUIMessageChunk);
+  } else if (part.type === 'text') {
     writer.write({ type: 'text-start', id: 'replay-text' });
     writer.write({ type: 'text-delta', id: 'replay-text', delta: part.text });
     writer.write({ type: 'text-end', id: 'replay-text' });
@@ -295,7 +257,9 @@ function replayCompletedTurn(
     execute: ({ writer }) => {
       writer.write({ type: 'start', messageId: turn.id });
       writer.write({ type: 'data-turn', data: { clientTurnId } });
+      const nativeText = turn.parts.some(part => part.type === 'ui-chunk' && part.chunk.type === 'text-start');
       for (const part of turn.parts) {
+        if (nativeText && (part.type === 'text' || part.type === 'reasoning')) continue;
         const artifact = part.type === 'asset'
           ? artifactRepository.get(part.artifactId)
           : null;
@@ -430,9 +394,9 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
         writer.write({ type: 'data-turn', data: { clientTurnId: body.clientTurnId } });
         const persistedParts: PersistedMessagePart[] = [];
         let output: AgentOutput | undefined;
-        let rawOutput = '';
+
         let streamedReply = '';
-        let replyStarted = false;
+
         const toolNamesByCallId = new Map<string, string>();
 
         try {
@@ -445,20 +409,25 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
             if (chunk.type === 'abort') throw new Error('Agent aborted the request.');
             if (chunk.type !== 'start' && chunk.type !== 'finish') writer.write(chunk as ChatUIMessageChunk);
             if (chunk.type === 'text-delta') streamedReply += chunk.delta;
+            if (chunk.type === 'file' || chunk.type.startsWith('tool-') || chunk.type.startsWith('text-') || chunk.type.startsWith('reasoning-') || chunk.type === 'start-step' || chunk.type === 'finish-step') {
+              persistedParts.push({ type: 'ui-chunk', chunk: { ...chunk } });
+            }
             if (chunk.type === 'reasoning-delta') persistedParts.push({ type: 'reasoning', text: chunk.delta });
             if (chunk.type === 'tool-input-available') toolNamesByCallId.set(chunk.toolCallId, chunk.toolName);
-            if (chunk.type === 'tool-output-available' && toolNamesByCallId.get(chunk.toolCallId) === 'generate-blender-script') {
+            if (chunk.type === 'tool-output-available' && ['generate-three-model'].includes(toolNamesByCallId.get(chunk.toolCallId) ?? '')) {
               const result = chunk.output as { script?: string; validation?: string };
               if (result?.validation === 'passed' && typeof result.script === 'string') {
                 output = { type: 'asset', brief: input.text.slice(0, 4000), script: result.script, blenderVersion: '4.x', preferenceProposals: [] };
               }
             }
           }
-          if (output?.type === 'asset' && validateBlenderScript(output.script).ok) {
+          if (context.req.raw.signal.aborted) throw new DOMException('Request aborted.', 'AbortError');
+          if (output?.type === 'asset' && validateAssetScript(output.script).ok) {
             const artifact = artifacts.createPending({ conversationId: conversation.id, brief: output.brief, script: output.script });
             writer.write({ type: 'data-asset', id: artifact.id, data: artifact });
             persistedParts.push({ type: 'asset', artifactId: artifact.id });
           }
+          if (context.req.raw.signal.aborted) throw new DOMException('Request aborted.', 'AbortError');
           conversations.completeTurn(conversation.id, body.clientTurnId, {
             id: assistantMessageId, conversationId: conversation.id, role: 'assistant',
             parts: [{ type: 'text', text: streamedReply }, ...persistedParts],

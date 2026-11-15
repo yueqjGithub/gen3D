@@ -78,13 +78,15 @@ export function ChatView({
 
   // 消息新增或流式更新时，把消息区滚动到底部。
   const messagesRef = useRef<HTMLDivElement>(null);
+  const followBottom = useRef(true);
   useEffect(() => {
     const el = messagesRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [chat.messages]);
+    if (el && followBottom.current) el.scrollTop = el.scrollHeight;
+  }, [chat.messages, busy]);
 
   // 上传发生在 Composer 中；聊天请求只携带附件元数据和已上传的附件 ID。
   async function sendMessage(text: string, attachments: UploadMetadata[]) {
+    followBottom.current = true;
     clientTurnId.current = crypto.randomUUID();
     attachmentIds.current = attachments.map(({ id }) => id);
     const parts: ChatUIMessage['parts'] = [];
@@ -96,6 +98,7 @@ export function ChatView({
         type: 'data-attachment',
         id: attachment.id,
         data: {
+          url: api.baseUrl + '/api/conversations/' + conversation.id + '/attachments/' + attachment.id,
           id: attachment.id,
           fileName: attachment.fileName,
           mediaType: attachment.mediaType,
@@ -141,7 +144,7 @@ export function ChatView({
         </div>
       </header>
 
-      <div className="chat-view__messages" ref={messagesRef} aria-label="对话消息" aria-live="polite">
+      <div className="chat-view__messages" ref={messagesRef} onScroll={(event) => { const el = event.currentTarget; followBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} aria-label="对话消息" aria-live="polite">
         {chat.messages.length === 0 ? (
           <div className="chat-view__empty">
             <span className="chat-view__empty-mark" aria-hidden="true">◌</span>
@@ -160,6 +163,7 @@ export function ChatView({
               </span>
               <MessageParts
                 message={message}
+                pending={busy && message === chat.messages.at(-1) && message.role === 'assistant'}
                 onOpenAsset={onOpenAsset}
                 onConfirmPreference={async (proposal) => {
                   await api.savePreference(proposal.key, proposal.value);
@@ -168,8 +172,11 @@ export function ChatView({
             </article>
           ))
         )}
+        {/* 发出请求时 assistant 消息可能尚未创建，先在消息列表尾部给出反馈。 */}
+        {busy && chat.messages.at(-1)?.role !== 'assistant' && (
+          <p className="chat-view__waiting" role="status"><span className="loading-dot" aria-hidden="true" />正在等待 Agent 回复…</p>
+        )}
       </div>
-
       {chat.error && (
         <div className="chat-view__error" role="alert">
           <span>{chat.error.message}</span>
@@ -179,16 +186,11 @@ export function ChatView({
         </div>
       )}
       {actionError && <p className="inline-error" role="alert">{actionError}</p>}
-      {busy && (
-        <button type="button" className="chat-view__stop" onClick={() => void chat.stop()}>
-          停止生成
-        </button>
-      )}
-
       <Composer
         onUpload={(file) => api.uploadAttachment(conversation.id, file)}
         onSubmit={sendMessage}
-        disabled={busy}
+        generating={busy}
+        onStop={() => void chat.stop()}
         modelId={model?.modelId ?? null}
         hasApiKey={Boolean(model && apiKey.trim())}
         onOpenModelSettings={onOpenModelSettings}

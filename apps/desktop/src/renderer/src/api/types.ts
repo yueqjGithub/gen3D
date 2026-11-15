@@ -16,7 +16,7 @@ export type ChatDataParts = {
   activity: ToolActivity;
   turn: { clientTurnId: string };
   preference: PreferenceProposal;
-  attachment: { id: string; fileName: string; mediaType: string };
+  attachment: { url?: string; id: string; fileName: string; mediaType: string };
 };
 
 // 历史消息的保存状态放在 metadata；实时流消息不一定包含该字段。

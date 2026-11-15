@@ -13,7 +13,7 @@
   "dependencies": {
     "@agent3d/shared": "workspace:*",
     "@hono/node-server": "1.19.0",
-    "@mastra/libsql": "1.28.0",
+    "@mastra/libsql": "1.30.0",
     "ai": "7.0.159",
     "better-sqlite3": "13.0.3",
     "hono": "4.13.14",

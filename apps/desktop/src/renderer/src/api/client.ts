@@ -1,3 +1,4 @@
+import { readUIMessageStream, type UIMessageChunk } from 'ai';
 import {
   apiErrorSchema,
   assetArtifactSchema,
@@ -45,7 +46,8 @@ function parsePreferences(value: unknown): Record<string, string> {
   );
 }
 
-const baseUrl = 'http://127.0.0.1:62586';
+// 未配置时沿用本地 Hono 地址。去掉末尾斜杠，拼接 /api 路径时只保留一个斜杠。
+const baseUrl = (import.meta.env.AGENT3D_SERVER_URL?.trim() || 'http://127.0.0.1:62586').replace(/\/+$/, '');
 
 // 普通 JSON 接口共用请求与错误处理；下载文件和聊天流分别使用自己的响应方式。
 async function request(path: string, init?: RequestInit): Promise<unknown> {
@@ -135,9 +137,10 @@ export const api = {
 
     return Promise.all(messages.map(async (message) => {
       const parts: ChatUIMessage['parts'] = [];
+      const hasNativeText = message.parts.some(part => part.type === 'ui-chunk' && part.chunk.type === 'text-start');
       for (const [index, part] of message.parts.entries()) {
         if (part.type === 'text' || part.type === 'reasoning') {
-          parts.push(part);
+          if (!hasNativeText) parts.push(part);
         } else if (part.type === 'tool-activity') {
           const activity: ChatDataParts['activity'] = {
             toolCallId: `${message.id}-${index}`,
@@ -150,6 +153,7 @@ export const api = {
             type: 'data-attachment',
             id: part.attachmentId,
             data: {
+              url: baseUrl + '/api/conversations/' + conversationId + '/attachments/' + part.attachmentId,
               id: part.attachmentId,
               fileName: part.fileName,
               mediaType: part.mediaType,
@@ -168,6 +172,17 @@ export const api = {
         }
       }
 
+      const chunks = message.parts.flatMap(part => part.type === 'ui-chunk' ? [part.chunk as UIMessageChunk] : []);
+      if (chunks.length) {
+        const stream = new ReadableStream<UIMessageChunk>({ start(controller) {
+          controller.enqueue({ type: 'start', messageId: message.id });
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.enqueue({ type: 'finish' }); controller.close();
+        }});
+        let restored: ChatUIMessage | undefined;
+        for await (const snapshot of readUIMessageStream<ChatUIMessage>({ stream })) restored = snapshot;
+        if (restored) parts.unshift(...restored.parts);
+      }
       return {
         id: message.id,
         role: message.role,

@@ -1,3 +1,6 @@
+import { useMemo } from 'react';
+import { readThreeModel } from '@agent3d/shared';
+import { ModelPreview } from './ModelPreview';
 import { useEffect, useState } from 'react';
 import type { AssetArtifact } from '@agent3d/shared';
 import { api } from '../../api/client';
@@ -10,6 +13,7 @@ export interface AssetPanelProps {
 
 /** 编辑、校验和审批生成的 Blender 脚本；脚本不会在桌面端执行。 */
 export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
+  const model = useMemo(() => readThreeModel(artifact.script), [artifact.script]);
   const [script, setScript] = useState(artifact.script);
   const [validation, setValidation] = useState<ScriptValidation | null>(null);
   const [busy, setBusy] = useState(false);
@@ -76,7 +80,7 @@ export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = `asset-${artifact.id}-v${artifact.version}.py`;
+      anchor.download = `asset-${artifact.id}-v${artifact.version}.${model ? 'glb' : 'py'}`;
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (downloadError) {
@@ -103,28 +107,32 @@ export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
       </header>
 
       <section className="asset-panel__summary">
-        <span>BLENDER {artifact.blenderVersion}</span>
+        <span>{model ? 'THREE.JS' : 'BLENDER ' + artifact.blenderVersion}</span>
         <h3>{artifact.brief}</h3>
         <p>版本 {artifact.version} · 编辑后需重新批准</p>
       </section>
 
+      {model && <ModelPreview artifactId={artifact.id} />}
+      <details open={!model}>
+        <summary>{model ? '查看建模脚本' : '查看或编辑脚本'}</summary>
       <div className="asset-panel__editor">
-        <label htmlFor="asset-script">Blender Python 脚本</label>
+        <label htmlFor="asset-script">{model ? 'Three.js 建模脚本' : '脚本'}</label>
         <textarea
           id="asset-script"
-          aria-label="Blender Python 脚本"
+          aria-label={model ? 'Three.js 建模脚本' : 'Blender Python 脚本'}
           spellCheck={false}
-          value={script}
+          value={model ? model.source : script}
           onChange={(event) => setScript(event.target.value)}
-          disabled={artifact.status !== 'pending' || busy}
+          disabled={Boolean(model) || artifact.status !== 'pending' || busy}
         />
       </div>
 
+      </details>
       <div className="asset-panel__validation" role="status">
         {validation === null
           ? '正在检查脚本…'
           : validation.ok
-            ? '静态脚本检查通过'
+            ? (model ? '场景数据检查通过' : '静态脚本检查通过')
             : `需要修正脚本：${validation.code ?? '检查失败'}`}
       </div>
       {error && <p className="inline-error" role="alert">{error}</p>}
@@ -157,11 +165,11 @@ export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
           onClick={() => void download()}
           disabled={busy || artifact.status !== 'approved'}
         >
-          下载 .py
+          下载 {model ? '.glb' : '.py'}
         </button>
       </div>
       <p className="asset-panel__disclaimer">
-        脚本仅做静态检查，不会在应用内执行。请在 Blender 中审阅后再运行。
+        {model ? '预览加载已导出的 GLB；修改模型请在聊天中提出要求。' : '脚本仅做静态检查，请在 Blender 中审阅后再运行。'}
       </p>
     </aside>
   );

@@ -27,7 +27,7 @@ export interface StandaloneServer {
  * 测试可以传入独立目录，避免修改用户数据库。
  */
 export async function startServer(
-  dataDirectory = parseEnv(readFileSync(fileURLToPath(new URL('../../../.env', import.meta.url)), 'utf8')).AGENT3D_DATA_DIR || '',
+  dataDirectory = process.env.AGENT3D_DATA_DIR ?? parseEnv(readFileSync(fileURLToPath(new URL('../../../.env', import.meta.url)), 'utf8')).AGENT3D_DATA_DIR ?? '',
 ): Promise<StandaloneServer> {
   if (!isAbsolute(dataDirectory)) {
     throw new Error('AGENT3D_DATA_DIR in apps/agent/.env must be an absolute path.');

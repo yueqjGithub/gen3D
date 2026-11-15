@@ -14,6 +14,9 @@ export const conversationSchema = z.object({
  * 使用应用自有的中立格式，避免把数据库历史绑定到某个 AI SDK 版本。
  */
 export const persistedMessagePartSchema = z.discriminatedUnion('type', [
+  // 原生 UI 流事件原样保存，用于刷新后重建图片和工具调用。
+  // 这里只声明存储容器，不重新定义 AI SDK 的通信协议。
+  z.object({ type: z.literal('ui-chunk'), chunk: z.record(z.string(), z.unknown()) }),
   z.object({
     type: z.literal('text'),
     text: z.string(),

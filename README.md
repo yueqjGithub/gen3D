@@ -1,6 +1,6 @@
 # 形构 Agent：3D 资产学习工作台
 
-这是一个使用 Mastra 构建的本地 Agent 学习项目。用户可以通过对话、图片或文档描述需求；Agent 根据明确的创作意图生成 Blender 4.x Python 脚本，Hono 将结果保存为待审阅资产。脚本只做静态校验，不会由应用执行。
+这是一个使用 Mastra 构建的本地 Agent 学习项目。用户可以通过对话、图片或文档描述需求。Agent 编写 Three.js 脚本，通过本地工具执行并导出 GLB，用户可以在桌面端旋转查看、批准和下载模型。
 
 ## 运行要求
 
@@ -74,7 +74,7 @@ Mastra Agent
   http://127.0.0.1:62687
 ```
 
-三个端口固定，不支持通过环境变量覆盖。桌面 renderer 只访问 Hono；Hono 通过固定 loopback URL 调用 Mastra。Hono 只接受开发 renderer 的 `http://localhost:5173` 和打包后 Electron `file:` 页面的 `null` 或缺省 Origin（需包含 Electron User-Agent），并且只绑定本机回环地址。
+桌面端从仓库根目录的 `.env` 读取 `AGENT3D_SERVER_URL`，默认值为 `http://127.0.0.1:62586`。聊天、附件和 Markdown 图片的来源判断共用此地址。修改后重启桌面开发进程，发布版需重新构建。Hono 本身监听本机回环地址，通过固定 loopback URL 调用 Mastra。Hono 只接受开发 renderer 的 `http://localhost:5173` 和打包后 Electron `file:` 页面的 `null` 或缺省 Origin（需包含 Electron User-Agent）。
 
 Hono 将模型选择、API Key、附件和偏好放在请求体的 `agent3d` 字段；Mastra 聊天路由的中间件将其写入当前请求的 `requestContext`，Agent 按当前请求创建模型。Mastra 的敏感数据过滤器会在持久化追踪前隐藏 `apiKey` 字段。Agent 返回结构化结果，Hono 校验后再展示回复或创建待审批资产；推理和工具活动仍实时显示，最终回复文本在校验完成后显示。
 
@@ -87,8 +87,8 @@ Desktop 的 React 入口在 `apps/desktop/src/renderer/src/App.tsx`：它管理�
 - 会话列表、历史消息和 SQLite 持久化。
 - 文档与图片附件；具体图片输入能力取决于所选聊天模型。
 - 显示 Agent reasoning 和工具活动，支持失败重试与停止生成。
-- Agent 只在用户当前消息明确要求创建 3D 资产时才进入资产生成流程；问候、能力咨询、含糊请求或仅上传附件都不会自动生成。
-- Blender 脚本经过静态安全校验后，以待审阅资产展示；用户可编辑、批准或拒绝，应用不执行脚本。
+- 用户提出创建 3D 资产后，可以分几轮回答类型、风格和材质的追问，生成后也能用“换成红色”“加宽口沿”等短句继续修改。建模工具在每轮可用，由 Agent 按完整对话判断是否执行。修改时读取历史源码并重新导出 GLB，工具成功后资产面板显示新版本。
+- 资产审阅面板展示 GLB 模型和 Three.js 源码，可通过聊天继续修改，也可批准、下载或拒绝资产。
 - 保存经用户确认的偏好建议。
 - 工作台可分别选择聊天模型和生图模型。生图模型选择目前仅保存配置，尚未实现单独的生图请求流程。
 
@@ -125,3 +125,36 @@ apps/
 packages/
   shared/   Zod 契约、消息/模型配置和 Blender 脚本静态校验
 ```
+
+
+### Windows 模型请求的证书链
+
+如果本机 Node 提示 unable to verify the first certificate，而证书已安装在 Windows 系统信任库，可在支持该选项的 Node 版本（本次验证为 Node 24）中使用系统证书：
+
+```powershell
+$env:NODE_OPTIONS = '--use-system-ca'
+pnpm dev
+```
+
+这不会关闭 TLS 校验。此设置只影响当前 PowerShell 启动的进程，不需要修改模型或 Agent 业务代码。
+
+### Three.js 脚本生成 GLB
+
+Agent 的 `generate-three-model` 工具接收 `source`：JavaScript 或 TypeScript 的函数体，直接使用注入的 `THREE`，最后返回 `THREE.Group` 或 `THREE.Mesh`。可使用自定义 BufferGeometry、曲线、轮廓拉伸、旋转曲面和 CanvasTexture，不再局限于基础几何体 JSON。
+
+脚本还能直接使用以下建模函数。
+
+- `sculpt([[x,y,z,rx,ry,rz], ...], blend = 0.35, resolution = 48)` 从相互重叠的椭球体提取一张连续表面。六个数字分别是中心位置与三个半轴长度。返回的几何体带平滑法线，可按顶点位置着色。融合度范围为 0 到 1，采样分辨率为 24 到 72。细长的小部件可以单独建模。
+- `taper([[x,y,z,radiusA,radiusB], ...])` 沿一串控制点扫出逐渐变粗或变细的椭圆截面，适合尾巴、枝条、把手。它与 `sculpt` 都返回 `BufferGeometry`，可直接传给 `new THREE.Mesh(geometry, material)`。
+- `THREE.RoundedBoxGeometry` 可给机壳、家具等硬边部件加倒角。
+- `makeDog({coat, spots, spotColor, collar, slender})` 返回站姿短毛犬的 Group。可选的颜色参数使用 Three.js 颜色值，`spots` 控制斑纹，`slender` 调整躯干比例和收腹程度。例如下面这段就是斑点狗资产的完整工具输入脚本。犬体的比例、耳朵、腿和花纹算法集中在 `apps/agent/src/mastra/tools/dog-model.ts`，可以对照预览学习。
+
+```js
+return makeDog({ coat: '#f2eee4', spots: true, spotColor: '#211e1c', collar: '#af2232' });
+```
+
+工具集中在 `apps/agent/src/mastra/tools/generate-three-model.ts`：编译 TypeScript → 一次性 Chromium 页面执行 → GLTFExporter 导出 → 共享数据目录 `models/<UUID>.glb`。Desktop 使用 GLTFLoader 加载文件，不执行生成代码。聊天流只携带脚本和模型 ID，不携带二进制。
+
+Windows 默认使用 `C:/Program Files/Google/Chrome/Application/chrome.exe`。Chrome 在其他位置时设置 `THREE_CHROME_PATH`；没有 Chrome 的环境可在 Agent 目录运行 `pnpm exec playwright install chromium`。
+
+执行页面禁止联网、没有登录态，不暴露 Node 或磁盘 API。建模执行超时 15 秒，最多 1000 个网格、50 万顶点、GLB 20 MB。工具会把运行错误返回给 Agent，供它修复脚本。修改模型请通过聊天提出，工具会重新执行完整脚本并导出新文件；审阅面板的脚本仅供查看，审批后下载 `.glb`。

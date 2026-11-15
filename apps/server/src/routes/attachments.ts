@@ -81,6 +81,17 @@ export interface AttachmentRouteDependencies {
 export function createAttachmentRoutes({ conversations, attachments }: AttachmentRouteDependencies) {
   const routes = new Hono();
 
+  // 图片预览也验证会话归属，不暴露任意磁盘路径。
+  routes.get('/conversations/:id/attachments/:attachmentId', async (context) => {
+    const conversation = conversations.get(context.req.param('id'), getCookie(context, 'username')!);
+    const metadata = conversation && attachments.listByConversation(conversation.id)
+      .find(item => item.id === context.req.param('attachmentId'));
+    if (!metadata) throw new HttpError(404, 'NOT_FOUND', 'Attachment not found.');
+    const bytes = await attachments.read(metadata.id);
+    if (!bytes) throw new HttpError(404, 'NOT_FOUND', 'Attachment not found.');
+    return new Response(bytes as BodyInit, { headers: { 'Content-Type': metadata.mediaType, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
+  });
+
   routes.post('/conversations/:id/attachments', async (context) => {
     const conversation = conversations.get(context.req.param('id'), getCookie(context, 'username')!);
     if (!conversation) {

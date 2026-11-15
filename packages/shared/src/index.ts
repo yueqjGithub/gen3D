@@ -12,3 +12,7 @@ export * from './conversations';
 export * from './errors';
 /** 聊天模型和生图模型的选择配置契约。 */
 export * from './models';
+
+export * from './three-scene';
+
+export * from './three-model';

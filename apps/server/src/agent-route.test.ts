@@ -5,7 +5,7 @@ import { RequestContext } from '../../agent/node_modules/@mastra/core/dist/reque
 import { expect, it, vi } from 'vitest';
 import { createTestDirectory } from './test-directory';
 
-it('runs the Mastra chat route with request context and returns structured output', async () => {
+it('runs the Mastra chat route with request context and returns native text output', async () => {
   const previousDirectory = process.env.AGENT3D_DATA_DIR;
   process.env.AGENT3D_DATA_DIR = createTestDirectory('agent-route-');
   const { mastra } = await import('../../agent/src/mastra/index');
@@ -34,7 +34,7 @@ it('runs the Mastra chat route with request context and returns structured outpu
     const agent = mastra.getAgentById('asset-creation-agent');
     if (!agent) throw new Error('Agent is missing.');
     const fetchSpy = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => {
-        const content = JSON.stringify({ result: { type: 'chat', reply: 'Hello' } });
+        const content = 'Hello';
         const chunk = { id: 'test', object: 'chat.completion.chunk', created: 1, model: 'test',
           choices: [{ index: 0, delta: { content }, finish_reason: null }] };
         const end = { id: 'test', object: 'chat.completion.chunk', created: 1, model: 'test',
@@ -55,8 +55,8 @@ it('runs the Mastra chat route with request context and returns structured outpu
       });
       expect(response.status).toBe(200);
       const body = await response.text();
-      expect(body).toContain('"type":"data-structured-output"');
-      expect(body).toContain('"reply":"Hello"');
+      expect(body).toContain('"type":"text-delta"');
+      expect(body).toContain('"delta":"Hello"');
       const request = fetchSpy.mock.calls[0];
       expect(String(request?.[0])).toContain('localhost:1/v1/chat/completions');
       expect(JSON.parse(String(request?.[1]?.body)).model).toBe('gpt-4.1-mini');

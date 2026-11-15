@@ -1,9 +1,22 @@
+import { readThreeModel } from '@agent3d/shared';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import { useState } from 'react';
 import type { PreferenceProposal } from '@agent3d/shared';
 import type { ChatUIMessage } from '../../api/types';
+import { api } from '../../api/client';
+
+const apiOrigin = new URL(api.baseUrl).origin;
+const markdownComponents: Components = {
+  img: ({ node, src, ...props }) => {
+    // 附件接口通过 Cookie 识别用户。按协议、主机和端口匹配 API，避免误认相似域名。
+    const isApiImage = src && URL.parse(src, document.baseURI)?.origin === apiOrigin;
+    return <img {...props} src={src} crossOrigin={isApiImage ? 'use-credentials' : undefined} />;
+  },
+};
 
 export interface MessagePartsProps {
   message: ChatUIMessage;
+  pending?: boolean;
   onOpenAsset?(artifactId: string): void;
   onConfirmPreference?(proposal: PreferenceProposal): Promise<void> | void;
 }
@@ -11,6 +24,7 @@ export interface MessagePartsProps {
 /** 按消息 part 的类型渲染文本、推理、工具活动、附件、资产和偏好建议。 */
 export function MessageParts({
   message,
+  pending = false,
   onOpenAsset,
   onConfirmPreference,
 }: MessagePartsProps) {
@@ -36,20 +50,41 @@ export function MessageParts({
       )}
       {message.parts.map((part, index) => {
         if (part.type === 'text') {
-          // 按代码围栏拆分，React 自动转义文本，避免执行模型输出的 HTML。
-          return <div className="message-parts__text" key={index}>{part.text.split(/(```[\s\S]*?```|!\[[^\]]*\]\([^)]+\))/g).map((block, i) => {
-            if (block.startsWith('```')) return <pre key={i}><code>{block.replace(/^```[^\n]*\n?/, '').replace(/```$/, '')}</code></pre>;
-            const image = /^!\[([^\]]*)\]\((https?:\/\/[^)]+|data:image\/[^)]+)\)$/.exec(block);
-            return image ? <img key={i} src={image[2]} alt={image[1]} style={{maxWidth: '100%'}} /> : <span key={i}>{block}</span>;
-          })}</div>;
+          // Markdown 只渲染为 React 元素，不启用原始 HTML。
+          // 未闭合的流式代码围栏也会被当作代码块，后续分片到达时自动更新。
+          return (
+            <div className="message-parts__text" key={index}>
+              <ReactMarkdown components={markdownComponents}>{part.text}</ReactMarkdown>
+            </div>
+          );
         }
         // useChat 已经把原生工具事件合并为一个带 state 的工具 part。
         if (part.type === 'dynamic-tool' || part.type.startsWith('tool-')) {
           const tool = part as { type: string; toolName?: string; state?: string; input?: unknown; output?: unknown; errorText?: string };
-          return <details key={index}><summary>{tool.toolName ?? tool.type.slice(5)} · {tool.state}</summary><pre>{JSON.stringify(tool.input, null, 2)}</pre><pre>{tool.errorText ?? JSON.stringify(tool.output, null, 2)}</pre></details>;
+          return <details className="message-parts__tool" key={index}>
+            <summary>{tool.toolName ?? tool.type.slice(5)} · {tool.state}</summary>
+            <pre>{JSON.stringify(tool.input, null, 2)}</pre>
+            <pre>{tool.errorText ?? JSON.stringify(tool.output, null, 2)}</pre>
+          </details>;
         }
-        if (part.type === 'file') {
-          return part.mediaType.startsWith('image/') ? <img key={index} src={part.url} alt={part.filename ?? '图片'} style={{maxWidth: '100%'}} /> : <a key={index} href={part.url}>{part.filename ?? '附件'}</a>;
+        if (part.type === 'file' || part.type === 'data-attachment') {
+          const nativeFile = part.type === 'file';
+          const url = nativeFile ? part.url : part.data.url;
+          const name = nativeFile ? part.filename : part.data.fileName;
+          const mediaType = nativeFile ? part.mediaType : part.data.mediaType;
+          if (url && mediaType.startsWith('image/')) {
+            const isApiImage = URL.parse(url, document.baseURI)?.origin === apiOrigin;
+            return (
+              <figure className="message-parts__image" key={index}>
+                <img src={url} alt={name ?? '图片'} crossOrigin={isApiImage ? 'use-credentials' : undefined} />
+                {name && <figcaption>{name}</figcaption>}
+              </figure>
+            );
+          }
+          if (nativeFile) return <a key={index} href={url}>{name ?? '附件'}</a>;
+          return <div className="message-parts__attachment" key={index}>
+            <span aria-hidden="true">▧</span><span>{name}</span><small>{mediaType}</small>
+          </div>;
         }
         if (part.type === 'reasoning') {
           return (
@@ -75,20 +110,11 @@ export function MessageParts({
             </div>
           );
         }
-        if (part.type === 'data-attachment') {
-          return (
-            <div className="message-parts__attachment" key={part.id ?? `attachment-${index}`}>
-              <span aria-hidden="true">▧</span>
-              <span>{part.data.fileName}</span>
-              <small>{part.data.mediaType}</small>
-            </div>
-          );
-        }
         if (part.type === 'data-asset') {
           return (
             <article className="message-parts__asset" key={part.id ?? `asset-${index}`}>
               <div>
-                <span className="message-parts__asset-label">BLENDER {part.data.blenderVersion}</span>
+                <span className="message-parts__asset-label">{readThreeModel(part.data.script) ? 'THREE.JS' : 'BLENDER ' + part.data.blenderVersion}</span>
                 <h3>{part.data.brief}</h3>
                 <p>{part.data.status === 'pending' ? '等待审阅' : part.data.status === 'approved' ? '已批准' : '已拒绝'}</p>
               </div>
@@ -124,6 +150,7 @@ export function MessageParts({
         }
         return null;
       })}
+      {pending && <p className="message-parts__loading" role="status"><span className="loading-dot" aria-hidden="true" />正在生成回复…</p>}
       {proposalError && <p className="inline-error" role="alert">{proposalError}</p>}
     </div>
   );

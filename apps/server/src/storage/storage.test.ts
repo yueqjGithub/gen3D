@@ -33,6 +33,26 @@ describe('SQLite storage', () => {
     );
   });
 
+  it('upgrades a pre-login database without deleting Studio threads or their assets', async () => {
+    // 模拟已使用的 v3 数据库：会话存在，但登录表尚未建立。
+    const conversations = createConversationRepository(database.connection);
+    const thread = conversations.create('Before login migration', 'agent3d-local');
+    const message = { id: randomUUID(), conversationId: thread.id, role: 'user' as const,
+      parts: [{ type: 'text' as const, text: 'Preserve this message' }],
+      createdAt: new Date().toISOString(), status: 'complete' as const };
+    conversations.appendMessage(message);
+    const artifact = createArtifactRepository(database.connection).createPending({ conversationId: thread.id, brief: 'Tree', script: 'import bpy' });
+    database.connection.exec('DROP TABLE user_preferences; DROP TABLE users; DELETE FROM schema_migrations WHERE version >= 4;');
+    database.close();
+    database = await createDatabase(databasePath);
+    expect(createConversationRepository(database.connection).listMessages(thread.id)).toEqual([message]);
+    expect(createArtifactRepository(database.connection).get(artifact.id)).toEqual(artifact);
+    expect(database.connection.pragma('foreign_key_check')).toEqual([]);
+    database.close();
+    database = await createDatabase(databasePath);
+    expect(createConversationRepository(database.connection).listMessages(thread.id)).toEqual([message]);
+  });
+
   it('migrationIsIdempotent', async () => {
     database.close();
     database = await createDatabase(databasePath);

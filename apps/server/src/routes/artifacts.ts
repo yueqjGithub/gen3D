@@ -2,7 +2,9 @@ import { Hono } from 'hono';
 import {
   artifactApprovalSchema,
   assetArtifactSchema,
-  validateBlenderScript,
+  validateAssetScript,
+  readThreeScene,
+  readThreeModel,
 } from '@agent3d/shared';
 import { z } from 'zod';
 import type { createArtifactRepository } from '../storage/artifacts';
@@ -24,6 +26,12 @@ export function createArtifactRoutes(artifacts: ArtifactRepository) {
   const routes = new Hono();
 
   // 读取资产，同时返回脚本的静态校验结果，界面据此提示用户脚本是否安全
+  // 待审批资产也可预览；下载仍要求批准。会话归属由 app.ts 的中间件统一验证。
+  routes.get('/artifacts/:id/model', async (context) => {
+    const bytes = await artifacts.readModel(context.req.param('id'));
+    if (!bytes) throw new HttpError(404, 'NOT_FOUND', 'GLB file not found.');
+    return new Response(bytes as BodyInit, { headers: { 'Content-Type': 'model/gltf-binary', 'Cache-Control': 'no-store' } });
+  });
   routes.get('/artifacts/:id', (context) => {
     const artifact = artifacts.get(context.req.param('id'));
     if (!artifact) {
@@ -31,12 +39,14 @@ export function createArtifactRoutes(artifacts: ArtifactRepository) {
     }
     return context.json({
       artifact,
-      scriptValidation: validateBlenderScript(artifact.script),
+      scriptValidation: validateAssetScript(artifact.script),
     });
   });
 
   routes.patch('/artifacts/:id', async (context) => {
     const body = editArtifactSchema.parse(await context.req.json());
+    const current = artifacts.get(context.req.param('id'));
+    if (current && readThreeModel(current.script)) throw new HttpError(409, 'CONFLICT', '请在聊天中修改模型，以重新执行脚本并导出 GLB。');
     const artifact = artifacts.updatePending(
       context.req.param('id'),
       body.expectedVersion,
@@ -44,7 +54,7 @@ export function createArtifactRoutes(artifacts: ArtifactRepository) {
     );
     return context.json({
       artifact,
-      scriptValidation: validateBlenderScript(artifact.script),
+      scriptValidation: validateAssetScript(artifact.script),
     });
   });
 
@@ -55,7 +65,8 @@ export function createArtifactRoutes(artifacts: ArtifactRepository) {
     if (!current) {
       throw new HttpError(404, 'NOT_FOUND', 'The requested artifact does not exist.');
     }
-    const validation = validateBlenderScript(current.script);
+    if (readThreeModel(current.script) && !await artifacts.readModel(current.id)) throw new HttpError(422, 'VALIDATION_FAILED', 'GLB 文件不存在，请重新生成。');
+    const validation = validateAssetScript(current.script);
     if (!validation.ok) {
       throw new HttpError(
         422,
@@ -76,7 +87,7 @@ export function createArtifactRoutes(artifacts: ArtifactRepository) {
   });
 
   // 下载：只有已批准的资产才能下载，以 .py 文件形式返回，用户自行在 Blender 里运行
-  routes.get('/artifacts/:id/download', (context) => {
+  routes.get('/artifacts/:id/download', async (context) => {
     const artifact = artifacts.get(context.req.param('id'));
     if (!artifact) {
       throw new HttpError(404, 'NOT_FOUND', 'The requested artifact does not exist.');
@@ -85,10 +96,13 @@ export function createArtifactRoutes(artifacts: ArtifactRepository) {
       throw new HttpError(409, 'CONFLICT', 'Only approved assets can be downloaded.');
     }
 
-    return new Response(artifact.script, {
+    const model = readThreeModel(artifact.script);
+    const body = model ? await artifacts.readModel(artifact.id) : artifact.script;
+    if (!body) throw new HttpError(404, 'NOT_FOUND', 'GLB file not found.');
+    return new Response(body as BodyInit, {
       headers: {
-        'Content-Type': 'text/x-python; charset=utf-8',
-        'Content-Disposition': `attachment; filename="asset-${artifact.id}-v${artifact.version}.py"`,
+        'Content-Type': model ? 'model/gltf-binary' : readThreeScene(artifact.script) ? 'application/json; charset=utf-8' : 'text/x-python; charset=utf-8',
+        'Content-Disposition': `attachment; filename="asset-${artifact.id}-v${artifact.version}.${model ? 'glb' : readThreeScene(artifact.script) ? 'json' : 'py'}"`,
         'Cache-Control': 'no-store',
       },
     });

@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -64,6 +66,44 @@ afterEach(async () => {
 }, 60000);
 
 describe('Hono API', () => {
+  it('previews pending GLB and downloads the same binary after approval', async () => {
+    const { app, artifacts, database } = await createFixture();
+    const created = await rendererRequest(app, '/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const { conversation } = await created.json();
+    const modelId = randomUUID();
+    const artifact = artifacts.createPending({ conversationId: conversation.id, brief: 'Script model', script: JSON.stringify({ format: 'three-script-v1', source: 'return new THREE.Group();', modelId }) });
+    const directory = join(dirname(database.connection.name), 'models');
+    await mkdir(directory, { recursive: true });
+    const bytes = new Uint8Array([103,108,84,70,2,0,0,0]);
+    await writeFile(join(directory, modelId + '.glb'), bytes);
+    const preview = await rendererRequest(app, '/api/artifacts/' + artifact.id + '/model');
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get('Content-Type')).toBe('model/gltf-binary');
+    expect(new Uint8Array(await preview.arrayBuffer())).toEqual(bytes);
+    expect((await rendererRequest(app, '/api/artifacts/' + artifact.id + '/download')).status).toBe(409);
+    const approved = await rendererRequest(app, '/api/artifacts/' + artifact.id + '/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: 1 }) });
+    expect(approved.status).toBe(200);
+    const downloaded = await rendererRequest(app, '/api/artifacts/' + artifact.id + '/download');
+    expect(downloaded.headers.get('Content-Disposition')).toContain('.glb');
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
+  });
+  it('serves image previews only to their conversation owner', async () => {
+    const { app } = await createFixture();
+    const created = await rendererRequest(app, '/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const { conversation } = await created.json();
+    const form = new FormData();
+    const png = Uint8Array.from([137,80,78,71,13,10,26,10]);
+    form.set('file', new File([png], 'reference.png', { type: 'image/png' }));
+    const upload = await rendererRequest(app, '/api/conversations/' + conversation.id + '/attachments', { method: 'POST', body: form });
+    const { attachment } = await upload.json();
+    const path = '/api/conversations/' + conversation.id + '/attachments/' + attachment.id;
+    const preview = await rendererRequest(app, path);
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get('Content-Type')).toBe('image/png');
+    expect(new Uint8Array(await preview.arrayBuffer())).toEqual(png);
+    await rendererRequest(app, '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'other', password: 'test' }) });
+    expect((await rendererRequest(app, path, { headers: { Cookie: 'username=other' } })).status).toBe(404);
+  });
   it('rejects a chat request without an API key', async () => {
     const { app } = await createFixture();
     const created = await rendererRequest(app, '/api/conversations', {
@@ -156,9 +196,8 @@ describe('Hono API', () => {
     const result = { result: { type: 'chat', reply: '你好' } };
     const chunks = [
       { type: 'text-start', id: 'text' },
-      { type: 'text-delta', id: 'text', delta: JSON.stringify(result) },
+      { type: 'text-delta', id: 'text', delta: '你好' },
       { type: 'text-end', id: 'text' },
-      { type: 'data-structured-output', data: { object: result } },
       { type: 'finish' },
     ];
     const fetchSpy = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(
@@ -190,7 +229,7 @@ describe('Hono API', () => {
     const history = await rendererRequest(app, `/api/conversations/${conversation.id}/messages`);
     const data = await history.json();
     expect(data).toMatchObject({ messages: expect.arrayContaining([
-      expect.objectContaining({ role: 'assistant', parts: [{ type: 'text', text: '你好' }] }),
+      expect.objectContaining({ role: 'assistant', parts: expect.arrayContaining([{ type: 'text', text: '你好' }]) }),
     ]) });
   });
 
@@ -203,12 +242,11 @@ describe('Hono API', () => {
     });
     const { conversation } = await createdResponse.json() as { conversation: { id: string } };
     const result = { result: { type: 'chat', reply: '第一段\n第二段' } };
-    const fragments = ['{"result":{"type":"chat","reply":"第一', '段\\', 'n第二', '段"}}'];
+    const fragments = ['第一', '段\n', '第二', '段'];
     const chunks = [
       { type: 'text-start', id: 'text' },
       ...fragments.map((delta) => ({ type: 'text-delta', id: 'text', delta })),
       { type: 'text-end', id: 'text' },
-      { type: 'data-structured-output', data: { object: result } },
       { type: 'finish' },
     ];
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
@@ -231,7 +269,7 @@ describe('Hono API', () => {
     const deltas = stream.split('\n')
       .filter((line) => line.startsWith('data: {'))
       .map((line) => JSON.parse(line.slice(6)) as { type?: string; id?: string; delta?: string })
-      .filter((chunk) => chunk.type === 'text-delta' && chunk.id === 'agent-reply')
+      .filter((chunk) => chunk.type === 'text-delta' && chunk.id === 'text')
       .map((chunk) => chunk.delta);
     expect(deltas.length).toBeGreaterThan(1);
     expect(deltas.join('')).toBe('第一段\n第二段');
@@ -249,8 +287,9 @@ describe('Hono API', () => {
     const result = {
       result: { type: 'asset', brief: '低多边形树木', script: 'import bpy', blenderVersion: '4.x', preferenceProposals: [] },
     };
-    const chunk = { type: 'data-structured-output', data: { object: result } };
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+    const chunk = { type: 'tool-output-available', toolCallId: 'script', output: { script: 'import bpy', validation: 'passed' } };
+    const inputChunk = { type: 'tool-input-available', toolCallId: 'script', toolName: 'generate-three-model', input: { script: 'import bpy' } };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(`data: ${JSON.stringify(inputChunk)}\n\ndata: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
       headers: { 'content-type': 'text/event-stream' },
     })));
     const response = await rendererRequest(app, '/api/chat', {
@@ -268,7 +307,7 @@ describe('Hono API', () => {
     const stream = await response.text();
     expect(stream).toContain('"type":"data-asset"');
     expect(stream).toContain('"status":"pending"');
-    expect(stream).toContain('"delta":"低多边形树木"');
+    expect(stream).toContain('"toolName":"generate-three-model"');
   });
 
   it('creates and lists conversations through SQLite', async () => {

@@ -12,6 +12,10 @@ export interface ToolActivity {
 }
 
 export type ChatDataParts = {
+  'tool-call-suspended': {
+    runId: string; toolCallId: string; toolName: string;
+    suspendPayload: import('@agent3d/shared').UserQuestion;
+  };
   asset: AssetArtifact;
   activity: ToolActivity;
   turn: { clientTurnId: string };

@@ -5,18 +5,25 @@ import { apiErrorSchema } from '@agent3d/shared';
 const developmentOrigin = 'http://localhost:5173';
 
 /**
- * 本地 API 的来源边界：这个服务只给自己的桌面端用，所以只放行两类来源，
+ * API 的来源边界：支持桌面端，以及部署时显式配置的 Web 来源，
  * 同时在这里直接写入 CORS 响应头（没有使用额外的 cors 中间件）。
  *  1. 开发环境的渲染进程：Origin 为 http://localhost:5173
  *  2. 打包后的 Electron：页面通过 file:// 加载，Origin 可能为 'null' 或省略；
  *     同时要求 User-Agent 含 Electron，避免普通网页借 opaque origin 访问本地 API。
+ *  3. Web 使用 AGENT3D_WEB_ORIGIN 精确匹配来源，包含协议和端口。
  */
 export function createLocalOriginMiddleware() {
+  const webOrigin = process.env.AGENT3D_WEB_ORIGIN ? new URL(process.env.AGENT3D_WEB_ORIGIN).origin : undefined;
   return createMiddleware(async (context, next) => {
     const origin = context.req.header('Origin');
     const isPackagedElectron = (origin === 'null' || origin === undefined)
       && context.req.header('User-Agent')?.includes('Electron/');
-    if (origin !== developmentOrigin && !isPackagedElectron) {
+    // 同域的图片及 GET 请求可能省略 Origin。只允许配置站点的 Host，
+    // 修改操作仍要求 Origin，避免外部页面借用户登录态发起写请求。
+    const isSameSiteRead = !origin && webOrigin && ['GET', 'HEAD'].includes(context.req.method)
+      && context.req.header('Host') === new URL(webOrigin).host;
+    const isWebOrigin = webOrigin !== undefined && origin === webOrigin;
+    if (origin !== developmentOrigin && !isWebOrigin && !isPackagedElectron && !isSameSiteRead) {
       return context.json(apiErrorSchema.parse({
         code: 'UNAUTHORIZED',
         message: 'This local API origin is not allowed.',

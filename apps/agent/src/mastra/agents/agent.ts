@@ -5,6 +5,8 @@ import {
   MAX_CONVERSATION_ATTACHMENTS,
   agentChatRequestContextSchema,
   preferenceProposalSchema,
+  userQuestionSchema,
+  userAnswerSchema,
 } from '@agent3d/shared';
 import { Agent } from '@mastra/core/agent';
 import { createTool } from '@mastra/core/tools';
@@ -67,6 +69,8 @@ export const agent = new Agent({
 
 根据完整对话判断创作意图。用户明确要求创建模型但没有说清对象时，先追问。用户随后回答对象、风格或材质时，沿用已经确认的创作请求，信息足够就用工具生成。比如你问“哪种工具，什么风格？”，用户答“一把剪刀，工业风”，即可开始。问候、能力咨询、教程、取消创作或仅上传附件都按当下问题回复。用户明确要求只引导、暂不生成时，继续引导。
 
+需要澄清对象、风格、材质或尺寸时，调用 ask-user 给出一个问题和 2–4 个具体选项，description 简短说明区别。用户也可以自定义答案。收到工具返回的 answer 后结合前面的需求继续，信息已经足够时直接生成，避免重复提问。明确的修改请求直接执行。
+
 先用 build-asset-brief 明确这个对象从侧面和正面最有辨识度的轮廓、主要部位的比例与连接、材质和用户指定的风格。优先把这些特征落实在模型上。用户要求低多边形、玩具或极简风格时保留这个要求。
 
 用 generate-three-model 提交完整 JS/TS 函数体，直接使用 THREE，最后 return THREE.Group 或 THREE.Mesh。米制，Y 轴朝上，主体靠近原点。按题材选建模方法：
@@ -87,6 +91,28 @@ export const agent = new Agent({
       : agentChatRequestContextSchema.parse(requestContext.get('agent3d'));
 
     return {
+      'ask-user': createTool({
+        id: 'ask-user',
+        description: 'Ask one focused question with 2–4 concrete options when the model requirements are unclear. The user can choose an option or write a custom answer. Wait for the answer before continuing.',
+        inputSchema: userQuestionSchema,
+        suspendSchema: userQuestionSchema,
+        resumeSchema: userAnswerSchema,
+        outputSchema: userAnswerSchema,
+        // 提问本身就是等待用户输入，无需先弹出一次“允许提问”的审批。
+        requireApproval: () => false,
+        execute: async (question, context) => {
+          const run = context?.agent;
+          if (!run) throw new Error('ask-user must run inside an Agent.');
+          // 第一次调用没有 resumeData，执行下面的 suspend，把问题放进暂停事件。
+          // Mastra 保存快照后结束这段上游响应，Server 继续等待桌面提交答案。
+          // 恢复时 Mastra 再次进入这个工具的 execute，此时 run.resumeData 已有用户答案，
+          // 直接 return 会把答案作为工具输出交给模型，模型才能继续推理或调用建模工具。
+          if (run.resumeData) return userAnswerSchema.parse(run.resumeData);
+          // suspend 不会让 JavaScript 在这一行一直等到用户回答，因此必须立即 return。
+          // 等待 HTTP 回答的 Promise 在 Server，恢复 execute 的执行状态由 Mastra 管理。
+          return await run.suspend(question);
+        },
+      }),
       'analyze-input': createTool({
         id: 'analyze-input',
         description: 'Analyze the current user request, available attachment context, and saved preferences. Use this before replying when attachments or preferences are relevant.',
@@ -164,13 +190,15 @@ export const agent = new Agent({
   },
   // 工具在每轮保持可用，是否创建或修改由完整对话和 instructions 决定。
   defaultOptions: ({ requestContext }) => {
-    const context = requestContext.get('agent3d') as { latestUserText: string } | undefined;
+    const context = requestContext.get('agent3d') as { latestUserText: string; toolApproval?: string } | undefined;
     const text = context?.latestUserText ?? '';
     const modifying = requestContext.get('hasExistingModel')
       && /修改|调整|改成|换成|改为|去掉|去除|删除|移除|只保留|加上|添加|增加|减少|加宽|加高|缩小|放大|变大|变小|一点|再.*些|change|remove|resize|replace/i.test(text)
       && !/如何|怎么|教程|建议|解释|不要执行|暂不|取消|how\s+to/i.test(text);
     return {
       maxSteps: 8,
+      // Mastra 在 execute 之前暂停并保存快照，只有明确选择自动确认才放行。
+      requireToolApproval: context?.toolApproval !== 'auto',
       toolCallConcurrency: 1,
       // 明确修改时第一步直接执行完整建模脚本；后续步骤恢复自动选择，便于修错和汇报。
       ...(modifying ? { prepareStep: ({ stepNumber }: { stepNumber: number }) => ({

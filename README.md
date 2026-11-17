@@ -12,6 +12,8 @@
 
 ## 快速开始
 
+浏览器客户端可直接复用 Desktop 的 React 界面。运行 `pnpm --filter @agent3d/desktop dev:web` 开发，运行 `pnpm --filter @agent3d/desktop build:web` 导出到 `apps/desktop/out/web`。Docker 编排、HTTPS、持久化和免费托管选项见 [Web 与 Docker 部署说明](docs/web-deployment.md)。
+
 首次安装依赖并准备 Electron runtime：
 
 ```powershell
@@ -61,6 +63,8 @@ Server 能读取 Mastra 原生写入的文本和推理片段；尚不能转换�
 
 ## 服务调用链
 
+详细的数据组装、SSE 和用户回答后的恢复流程见 [聊天数据流说明](docs/chat-data-flow.md)，其中包含时序图、字段用途和源码阅读顺序。
+
 ```text
 Electron / React renderer
   http://localhost:5173
@@ -76,7 +80,7 @@ Mastra Agent
 
 桌面端从仓库根目录的 `.env` 读取 `AGENT3D_SERVER_URL`，默认值为 `http://127.0.0.1:62586`。聊天、附件和 Markdown 图片的来源判断共用此地址。修改后重启桌面开发进程，发布版需重新构建。Hono 本身监听本机回环地址，通过固定 loopback URL 调用 Mastra。Hono 只接受开发 renderer 的 `http://localhost:5173` 和打包后 Electron `file:` 页面的 `null` 或缺省 Origin（需包含 Electron User-Agent）。
 
-Hono 将模型选择、API Key、附件和偏好放在请求体的 `agent3d` 字段；Mastra 聊天路由的中间件将其写入当前请求的 `requestContext`，Agent 按当前请求创建模型。Mastra 的敏感数据过滤器会在持久化追踪前隐藏 `apiKey` 字段。Agent 返回结构化结果，Hono 校验后再展示回复或创建待审批资产；推理和工具活动仍实时显示，最终回复文本在校验完成后显示。
+Hono 从数据库读取历史和偏好，并把本轮附件整理成文档文本或图片 data URL。对话和图片通过 `messages` 发送，模型配置、API Key、附件说明与偏好通过 `agent3d` 进入当前请求的 `requestContext`。Mastra 的敏感数据过滤器会在持久化追踪前隐藏 `apiKey` 字段。文本、推理和工具事件按 AI SDK 原生格式实时返回，工具成功生成模型后，Hono 创建待审阅资产并发送 `data-asset` 更新桌面面板。
 
 Electron main 只负责桌面窗口和开发者工具菜单，不启动或监督 Agent、Server，也不实现 preload API bridge。打包运行时需要用户或外部进程管理器先启动 Agent 和 Hono。
 
@@ -90,6 +94,9 @@ Desktop 的 React 入口在 `apps/desktop/src/renderer/src/App.tsx`：它管理�
 - 用户提出创建 3D 资产后，可以分几轮回答类型、风格和材质的追问，生成后也能用“换成红色”“加宽口沿”等短句继续修改。建模工具在每轮可用，由 Agent 按完整对话判断是否执行。修改时读取历史源码并重新导出 GLB，工具成功后资产面板显示新版本。
 - 资产审阅面板展示 GLB 模型和 Three.js 源码，可通过聊天继续修改，也可批准、下载或拒绝资产。
 - 保存经用户确认的偏好建议。
+- 需求不明确时，Agent 可调用 `ask-user`，展示一个问题和 2–4 个选项。用户也可输入自定义答案，提交后从暂停位置继续。提问在自动确认模式下仍等待回答，停止或关闭页面后当前问题结束。
+- 输入框下方默认选中手动确认。每个工具执行前会展示名称和参数，选择允许或拒绝后继续。自动确认会先弹出风险提示，接受后该会话后续发出的请求可直接执行工具。切换会话后恢复手动确认，生成或等待确认时确认方式锁定。
+- 等待工具确认时可停止生成。刷新或关闭页面会结束当前连接，已失效的确认按钮无法继续执行；重新发起请求会重新请求确认。
 - 工作台可分别选择聊天模型和生图模型。生图模型选择目前仅保存配置，尚未实现单独的生图请求流程。
 
 ## 常用命令

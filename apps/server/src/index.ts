@@ -1,8 +1,6 @@
 import { serve, type ServerType } from '@hono/node-server';
-import { readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { parseEnv } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { createApp } from './app';
 import { createSettingsRepository } from './config/settings-repository';
 import { createArtifactRepository } from './storage/artifacts';
@@ -12,8 +10,8 @@ import { createDatabase } from './storage/database';
 import { createPreferenceRepository } from './storage/preferences';
 import { createLoginRepository } from './storage/login';
 
-// Hono 固定监听的地址，Desktop 渲染进程直接请求这个地址（端口不可配置，便于学习）
-const serverURL = 'http://127.0.0.1:62586';
+// 本地默认地址与 Desktop 一致。容器可使用 HOST/PORT 调整监听地址。
+const serverURL = `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? 62586}`;
 
 /** startServer 的返回值：数据库文件位置，以及一个同时关闭 HTTP 服务和数据库的方法。 */
 export interface StandaloneServer {
@@ -22,15 +20,15 @@ export interface StandaloneServer {
 }
 
 /**
- * 启动流程：确定数据目录 → 打开 SQLite（自动迁移）→ 创建仓库和 Hono 应用 → 监听固定端口。
- * Agent 与 Server 使用 apps/agent/.env 指定的同一个绝对目录。
+ * 启动流程：确定数据目录 → 打开 SQLite（自动迁移）→ 创建仓库和 Hono 应用 → 监听 HTTP。
+ * Agent 与 Server 使用 AGENT3D_DATA_DIR 指定的同一个绝对目录。
  * 测试可以传入独立目录，避免修改用户数据库。
  */
 export async function startServer(
-  dataDirectory = process.env.AGENT3D_DATA_DIR ?? parseEnv(readFileSync(fileURLToPath(new URL('../../../.env', import.meta.url)), 'utf8')).AGENT3D_DATA_DIR ?? '',
+  dataDirectory = process.env.AGENT3D_DATA_DIR ?? '',
 ): Promise<StandaloneServer> {
   if (!isAbsolute(dataDirectory)) {
-    throw new Error('AGENT3D_DATA_DIR in apps/agent/.env must be an absolute path.');
+    throw new Error('AGENT3D_DATA_DIR must be an absolute path.');
   }
   const databasePath = join(dataDirectory, 'agent3d.sqlite');
   const database = await createDatabase(databasePath);
@@ -41,7 +39,7 @@ export async function startServer(
     artifacts: createArtifactRepository(database.connection),
     attachments: createAttachmentStore(
       database.connection,
-      join(dataDirectory, 'data', 'attachments'),
+      process.env.AGENT3D_ATTACHMENT_DIR ?? join(dataDirectory, 'data', 'attachments'),
     ),
     preferences: createPreferenceRepository(database.connection),
     settings: createSettingsRepository(database.connection),
@@ -49,8 +47,9 @@ export async function startServer(
   });
   const server: ServerType = serve({
     fetch: app.fetch,
-    hostname: '127.0.0.1',
-    port: 62586,
+    // 容器需要监听网络接口；本地开发默认仍绑定回环地址。
+    hostname: process.env.HOST ?? '127.0.0.1',
+    port: Number(process.env.PORT ?? 62586),
   });
 
   // 端口被占用等错误会触发 error 事件；这里让启动显式失败，并释放已打开的数据库

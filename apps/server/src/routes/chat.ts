@@ -7,6 +7,8 @@ import {
   modelConfigSchema,
   MAX_CONVERSATION_ATTACHMENTS,
   validateAssetScript,
+  userAnswerSchema,
+  type UserAnswer,
   type AgentOutput,
   type AgentServiceRequest,
   type ChatMessage,
@@ -70,6 +72,7 @@ const submittedMessageSchema = z.object({
 });
 // 聊天请求：clientTurnId 由前端为每一轮生成，重试同一轮时保持不变，服务端据此做幂等（见 beginTurn）
 const chatRequestSchema = z.object({
+  toolApproval: z.enum(['manual', 'auto']).default('manual'),
   conversationId: z.uuid(),
   clientTurnId: z.uuid(),
   // 只接收本轮用户消息；历史消息由服务端从数据库读取
@@ -87,10 +90,21 @@ export interface ChatRouteDependencies {
   settings: SettingsRepository;
 }
 
-/** 取出一条消息中所有文本片段并拼接（历史消息里的附件、推理等片段不会发给 Agent）。 */
+/**
+ * 整理下一轮模型需要的历史内容。正常文本直接保留，工具结果额外带回源码和用户答案。
+ * 因此“换成红色”能够参考上一版 source，“按刚才选的材质继续”也能找到之前的答案。
+ * 工具事件的完整 UI 展示历史由 ui-chunk 保存，这里得到的文本供下一轮模型理解上下文。
+ */
 function messageText(message: ChatMessage): string {
   return message.parts
-    .flatMap((part) => part.type === 'text' ? [part.text] : part.type === 'ui-chunk' && part.chunk.type === 'tool-output-available' && typeof (part.chunk.output as { script?: string })?.script === 'string' ? ['上一版模型完整数据：' + (part.chunk.output as { script: string }).script] : [])
+    .flatMap(part => {
+      if (part.type === 'text') return [part.text];
+      if (part.type !== 'ui-chunk' || part.chunk.type !== 'tool-output-available') return [];
+      const output = part.chunk.output as { script?: string; answer?: string } | undefined;
+      if (typeof output?.script === 'string') return ['上一版模型完整数据：' + output.script];
+      if (typeof output?.answer === 'string') return ['用户对需求问题的回答：' + output.answer];
+      return [];
+    })
     .join('\n');
 }
 
@@ -308,6 +322,44 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     preferences,
   } = dependencies;
   const routes = new Hono();
+  // 这两张 Map 由 createChatRoutes 创建一次，同一个 Hono 路由实例下的 HTTP 请求共享它们。
+  // /chat 在暂停时登记回调，/chat/answer 或 /chat/tool-approval 在用户提交时查出并调用。
+  // Map 保存的是进程内的函数引用，SQLite 中的 Mastra 快照则保存 Agent 的暂停运行状态。
+  // 两者各有用途：回调让当前 Server 请求继续，快照让 Mastra 恢复到正确的工具执行位置。
+  // 断开、停止或失败会清理登记项。Server 重启后这些内存回调消失，旧页面不能继续提交。
+  const pendingApprovals = new Map<string, {
+    conversationId: string;
+    decide(approved: boolean): void;
+  }>();
+  const pendingQuestions = new Map<string, {
+    conversationId: string;
+    answer(value: UserAnswer): void;
+  }>();
+
+  routes.post('/chat/answer', async context => {
+    const body = z.object({ questionId: z.string().min(1), ...userAnswerSchema.shape }).strict().parse(await context.req.json());
+    const question = pendingQuestions.get(body.questionId);
+    if (!question || !conversations.get(question.conversationId, getCookie(context, 'username')!)) {
+      throw new HttpError(404, 'NOT_FOUND', '此问题已结束或不属于当前用户。');
+    }
+    pendingQuestions.delete(body.questionId);
+    // 删除在前，确保同一答案只被接收一次；并校验会话归属，避免其他用户操作此运行。
+    // answer 是下面 Promise 内登记的函数，内部 resolve(value) 会唤醒 agent-client.ts
+    // 的 await question.answer。当前这个短 HTTP 请求随后回 204，聊天结果走原来的响应流。
+    question.answer({ answer: body.answer });
+    return context.body(null, 204);
+  });
+
+  routes.post('/chat/tool-approval', async context => {
+    const decision = z.object({ approvalId: z.string().min(1), approved: z.boolean() }).strict().parse(await context.req.json());
+    const pending = pendingApprovals.get(decision.approvalId);
+    if (!pending || !conversations.get(pending.conversationId, getCookie(context, 'username')!)) {
+      throw new HttpError(404, 'NOT_FOUND', '此工具确认已结束或不属于当前用户。');
+    }
+    pendingApprovals.delete(decision.approvalId);
+    pending.decide(decision.approved);
+    return context.body(null, 204);
+  });
 
   routes.post('/chat', async (context) => {
     const body = chatRequestSchema.parse(await context.req.json());
@@ -361,9 +413,13 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       body.attachmentIds,
       provider.supportsInlineImages,
     );
-    // 汇总一次 Agent 请求需要的全部上下文：模型、历史消息、附件内容和用户偏好
+    // 汇总一次 Agent 请求需要的全部上下文：模型、历史消息、附件内容和用户偏好。
+    // Desktop 只提交当前消息和附件 ID。Server 校验归属后从数据库补历史/偏好，从磁盘
+    // 读取图片或提取文档文本，得到独立于 UI 展示格式的 AgentServiceRequest。
+    // shared schema 描述本项目的 HTTP 入参约束，例如长度上限、模型配置和确认模式默认值。
     const history = conversations.listMessages(conversation.id);
     const agentRequest = agentServiceRequestSchema.parse({
+      toolApproval: body.toolApproval,
       model,
       apiKey: body.apiKey,
       messages: toAgentMessages(
@@ -386,7 +442,9 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     }
 
     const assistantMessageId = turn.assistantMessage?.id ?? randomUUID();
-    // createUIMessageStream 返回 AI SDK 的 UI 消息流，渲染进程的 useChat 直接消费它
+    // createUIMessageStream 创建 Desktop 这次 POST /api/chat 的长响应。
+    // execute 尚未返回时，用户可以另外提交答案，Server 也可以多次向 Agent 请求恢复。
+    // writer 始终写入这同一条响应，所以 useChat 持续消费它便能收到恢复后的内容。
     const stream = createUIMessageStream<ChatUIMessage>({
       execute: async ({ writer }) => {
         writer.write({ type: 'start', messageId: assistantMessageId });
@@ -398,18 +456,67 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
         let streamedReply = '';
 
         const toolNamesByCallId = new Map<string, string>();
+        const lifecycle = new AbortController();
+        // 反向代理通常会回收长期没有字节传输的连接。等待人工回答时发送瞬时心跳，
+        // AI SDK 不把它加入消息历史，模型也不会收到这类事件。
+        const heartbeat = setInterval(() => {
+          writer.write({ type: 'data-heartbeat', data: null, transient: true });
+        }, 15000);
+        // 用户停止/断开时由请求 signal 取消；成功或失败收尾时由 lifecycle 取消。
+        // 合并后的 signal 同时约束上游 fetch 和所有等待用户输入的 Promise。
+        const executionSignal = AbortSignal.any([context.req.raw.signal, lifecycle.signal]);
 
         try {
-          for await (const chunk of streamAgent(agentRequest, context.req.raw.signal)) {
+          for await (const chunk of streamAgent(agentRequest, executionSignal, (approvalId) => {
+            return new Promise<boolean>((resolve, reject) => {
+              const signal = executionSignal;
+              const abort = () => {
+                pendingApprovals.delete(approvalId);
+                reject(new DOMException('Request aborted.', 'AbortError'));
+              };
+              if (signal.aborted) { abort(); return; }
+              pendingApprovals.set(approvalId, {
+                conversationId: conversation.id,
+                decide: approved => {
+                  signal.removeEventListener('abort', abort);
+                  resolve(approved);
+                },
+              });
+              signal.addEventListener('abort', abort, { once: true });
+            });
+          }, (questionId) => {
+            // answerQuestion 回调由 streamAgent 在收到暂停事件时调用。
+            // new Promise 的构造函数立即执行，先把闭包中的 resolve 登记到 Map，
+            // Promise 本身随后交给 streamAgent 保存并 await。
+            return new Promise<UserAnswer>((resolve, reject) => {
+              const abort = () => {
+                pendingQuestions.delete(questionId);
+                reject(new DOMException('Request aborted.', 'AbortError'));
+              };
+              if (executionSignal.aborted) { abort(); return; }
+              pendingQuestions.set(questionId, {
+                conversationId: conversation.id,
+                answer: value => {
+                  // value 来自另一次 POST /chat/answer。
+                  // resolve 只让等待处可以继续；读取快照并执行后续步骤由 Mastra 完成。
+                  executionSignal.removeEventListener('abort', abort);
+                  resolve(value);
+                },
+              });
+              executionSignal.addEventListener('abort', abort, { once: true });
+            });
+          })) {
             if (context.req.raw.signal.aborted) {
               throw new DOMException('Request aborted.', 'AbortError');
             }
             // AI SDK 原生事件直接交给 useChat，不提取 JSON、不重写工具事件。
             // 下面的读取仅用于保存历史和创建待审批资产，不改变转发的数据。
             if (chunk.type === 'abort') throw new Error('Agent aborted the request.');
+            // 一个暂停/恢复过程有多段上游流，各段都有自己的 start/finish。
+            // Desktop 应当看到一条助手消息，所以由 Server 在整轮最外层统一写 start/finish。
             if (chunk.type !== 'start' && chunk.type !== 'finish') writer.write(chunk as ChatUIMessageChunk);
             if (chunk.type === 'text-delta') streamedReply += chunk.delta;
-            if (chunk.type === 'file' || chunk.type.startsWith('tool-') || chunk.type.startsWith('text-') || chunk.type.startsWith('reasoning-') || chunk.type === 'start-step' || chunk.type === 'finish-step') {
+            if (chunk.type === 'data-tool-call-suspended' || chunk.type === 'file' || chunk.type.startsWith('tool-') || chunk.type.startsWith('text-') || chunk.type.startsWith('reasoning-') || chunk.type === 'start-step' || chunk.type === 'finish-step') {
               persistedParts.push({ type: 'ui-chunk', chunk: { ...chunk } });
             }
             if (chunk.type === 'reasoning-delta') persistedParts.push({ type: 'reasoning', text: chunk.delta });
@@ -423,6 +530,9 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
           }
           if (context.req.raw.signal.aborted) throw new DOMException('Request aborted.', 'AbortError');
           if (output?.type === 'asset' && validateAssetScript(output.script).ok) {
+            // 工具成功导出 GLB 后，Server 创建可审批的业务资产，再额外发出 data-asset。
+            // ChatView 监听这个 part 并调用 onArtifactChange，右侧面板据此切换到新资产。
+            // 普通回复中说“已完成”不会触发这里，必须有成功的工具输出。
             const artifact = artifacts.createPending({ conversationId: conversation.id, brief: output.brief, script: output.script });
             writer.write({ type: 'data-asset', id: artifact.id, data: artifact });
             persistedParts.push({ type: 'asset', artifactId: artifact.id });
@@ -441,6 +551,9 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
             parts: [{ type: 'text', text: failure.message }], createdAt: new Date().toISOString(), status: 'error',
           });
           writer.write({ type: 'error', errorText: failure.message });
+        } finally {
+          clearInterval(heartbeat);
+          lifecycle.abort();
         }
       },
       onError: () => 'The model request failed. Check your model settings and retry.',

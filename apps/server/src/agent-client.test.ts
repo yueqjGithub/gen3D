@@ -9,6 +9,7 @@ it('sends application context separately from Mastra requestContext', async () =
   }));
   vi.stubGlobal('fetch', fetchSpy);
   const request = {
+    toolApproval: 'manual' as const,
     model: { providerId: 'agnes', modelId: 'agnes/agnes-3.0-flash', baseURL: 'https://apihub.agnes-ai.com/v1' },
     apiKey: 'example-test-key',
     messages: [{ role: 'user' as const, content: 'hello' }],
@@ -28,6 +29,7 @@ it('forwards the selected model and API key to the Agent', async () => {
   }));
   vi.stubGlobal('fetch', fetchSpy);
   const request = {
+    toolApproval: 'manual' as const,
     model: { providerId: 'openai', modelId: 'openai/gpt-4.1-mini', baseURL: 'https://api.openai.com/v1' },
     apiKey: 'example-test-key',
     messages: [{ role: 'user' as const, content: 'hello' }],
@@ -42,6 +44,7 @@ it('forwards the selected model and API key to the Agent', async () => {
 it('does not expose the Agent error body, which might contain credentials', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('private-test-key', { status: 500 })));
   const request = {
+    toolApproval: 'manual' as const,
     model: { providerId: 'agnes', modelId: 'agnes/agnes-3.0-flash', baseURL: 'https://apihub.agnes-ai.com/v1' },
     apiKey: 'private-test-key',
     messages: [{ role: 'user' as const, content: 'hello' }],

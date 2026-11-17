@@ -42,10 +42,14 @@ const agentChatImageMetadataSchema = z.object({
 }).strict();
 
 /**
- * Trusted, request-scoped values Hono supplies to the native Mastra chat route.
- * Image bytes remain in the AI SDK message parts and are never duplicated here.
+ * Hono 放进 agent3d 的本轮配置，经 Agent 中间件校验后进入 RequestContext。
+ * 模型选择/密钥用于构建 provider，toolApproval 控制执行前审批，
+ * documents/preferences 给 analyze-input 读取，latestUserText 表示本轮最初的用户消息。
+ * ask-user 的回答通过 resumeData 作为工具输出传给模型，恢复时 latestUserText 仍是原消息。
+ * 图片字节位于 messages 的 file part，此处 images 只保留名称和类型。
  */
 export const agentChatRequestContextSchema = z.object({
+  toolApproval: z.enum(['manual', 'auto']).default('manual'),
   model: serviceModelSchema,
   apiKey: z.string().trim().min(1).max(4096),
   latestUserText: z.string().max(50_000),
@@ -65,6 +69,7 @@ export const agentChatRequestContextSchema = z.object({
  * Validates the selected model and the prepared conversation data sent only from Hono to Agent.
  */
 export const agentServiceRequestSchema = z.object({
+  toolApproval: z.enum(['manual', 'auto']).default('manual'),
   model: serviceModelSchema,
   apiKey: z.string().trim().min(1).max(4096),
   messages: z.array(serviceMessageSchema).min(1).max(40)

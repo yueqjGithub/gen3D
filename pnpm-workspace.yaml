@@ -10,5 +10,6 @@ minimumReleaseAgeExclude:
   - ai@7.0.159
   - '@ai-sdk/react@4.0.163'
 allowBuilds:
+  better-sqlite3: true
   '@parcel/watcher': false
   esbuild: false

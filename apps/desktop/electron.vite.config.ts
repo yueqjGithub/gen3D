@@ -14,7 +14,7 @@ export default defineConfig(({ mode }) => ({
     // dev 和 build 都从仓库根目录读取 .env，只把公开的 Hono 地址注入渲染进程。
     define: {
       'import.meta.env.AGENT3D_SERVER_URL': JSON.stringify(
-        loadEnv(mode, resolve(appRoot, '../..'), 'AGENT3D_SERVER_URL').AGENT3D_SERVER_URL ?? '',
+        loadEnv(mode, resolve(appRoot, '../..'), 'AGENT3D_SERVER_URL').AGENT3D_SERVER_URL?.trim() || 'http://127.0.0.1:62586',
       ),
     },
     server: {

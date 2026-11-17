@@ -16,3 +16,4 @@ export * from './models';
 export * from './three-scene';
 
 export * from './three-model';
+export * from './user-question';

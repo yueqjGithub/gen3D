@@ -93,6 +93,15 @@ describe('3D asset agent', () => {
     await expect(agent.getModel({ requestContext })).rejects.toThrow();
   });
 
+  it('requires tool approval by default and allows explicitly selected automatic mode', async () => {
+    const requestContext = createRequestContext('请生成花瓶');
+    expect((await agent.getDefaultOptions({ requestContext })).requireToolApproval).toBe(true);
+    requestContext.set('agent3d', {
+      ...agentChatRequestContextSchema.parse(requestContext.get('agent3d')), toolApproval: 'auto',
+    });
+    expect((await agent.getDefaultOptions({ requestContext })).requireToolApproval).toBe(false);
+  });
+
   it('uses the requested provider and model instead of a fixed Agnes model', async () => {
     const requestContext = createRequestContext('hello');
     requestContext.set('agent3d', {
@@ -115,6 +124,7 @@ describe('3D asset agent', () => {
 
     expect(Object.keys(chatTools)).toEqual(Object.keys(assetTools));
     expect(Object.keys(assetTools)).toEqual([
+      'ask-user',
       'analyze-input',
       'generate-three-model',
       'build-asset-brief',

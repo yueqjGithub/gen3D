@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createLocalOriginMiddleware } from './local-origin';
 
 const app = new Hono();
@@ -7,6 +7,21 @@ app.use('*', createLocalOriginMiddleware());
 app.get('/', (context) => context.text('ok'));
 
 describe('local renderer origin boundary', () => {
+  it('accepts the configured Web origin and same-site images while rejecting cross-site writes', async () => {
+    vi.stubEnv('AGENT3D_WEB_ORIGIN', 'https://workbench.example.com');
+    try {
+      const web = new Hono();
+      web.use('*', createLocalOriginMiddleware());
+      web.all('/', context => context.text('ok'));
+      expect((await web.request('/', { headers: { Origin: 'https://workbench.example.com' } })).status).toBe(200);
+      expect((await web.request('/', { headers: { Host: 'workbench.example.com' } })).status).toBe(200);
+      expect((await web.request('/', { method: 'POST', headers: { Host: 'workbench.example.com' } })).status).toBe(403);
+      expect((await web.request('/', { headers: { Origin: 'https://other.example.com', Host: 'workbench.example.com' } })).status).toBe(403);
+      expect((await web.request('/', { headers: { Host: 'other.example.com' } })).status).toBe(403);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it('allows the fixed development renderer without an API token', async () => {
     const response = await app.request('/', {
       headers: { Origin: 'http://localhost:5173' },

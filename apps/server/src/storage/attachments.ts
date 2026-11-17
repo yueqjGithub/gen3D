@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import {
@@ -9,8 +9,6 @@ import {
   type UploadMetadata,
 } from '@agent3d/shared';
 import type { SqliteDatabase } from './database';
-import { parseEnv } from 'node:util';
-import { fileURLToPath } from 'node:url';
 
 interface AttachmentRow {
   id: string;
@@ -56,8 +54,8 @@ export function createAttachmentStore(
   database: SqliteDatabase,
   rootPath?: string,
 ): AttachmentStore {
-  const fileDir = parseEnv(readFileSync(fileURLToPath(new URL('../../../../.env', import.meta.url)), 'utf8')).AGENT3D_ATTACHMENT_DIR || ''
-  const root = resolve(fileDir);
+  // 调用方可传独立目录用于测试/部署。进程环境由启动命令加载，构建产物无需依赖源码旁的 .env。
+  const root = resolve(rootPath ?? process.env.AGENT3D_ATTACHMENT_DIR ?? 'data/attachments');
 
   // 磁盘文件名只使用 UUID，不使用用户上传的文件名，避免路径穿越
   function filePath(conversationId: string, attachmentId: string): string {

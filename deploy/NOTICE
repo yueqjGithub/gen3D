@@ -1,0 +1,3 @@
+Chromium seccomp profile vendored from Microsoft Playwright.
+Source https://github.com/microsoft/playwright/blob/ae935a43d9e376e4759548f6b3c6905c7b282333/utils/docker/seccomp_profile.json
+Apache-2.0. See playwright-LICENSE in this directory.

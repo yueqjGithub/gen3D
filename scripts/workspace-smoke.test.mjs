@@ -40,7 +40,7 @@ test('Mastra owns the fixed Agent port and reads provider keys from its local en
     'OPENAI_API_KEY=',
     'ANTHROPIC_API_KEY=',
   ]);
-  assert.match(entrypoint, /host:\s*'127\.0\.0\.1'/);
+  assert.match(entrypoint, /host:\s*process\.env\.AGENT3D_AGENT_HOST\s*\?\?\s*'127\.0\.0\.1'/);
   assert.match(entrypoint, /port:\s*62687/);
   assert.match(entrypoint, /path:\s*'\/chat\/:agentId'/);
   assert.match(entrypoint, /version:\s*'v7'/);
@@ -59,8 +59,8 @@ test('Hono binds the fixed local address and calls the native Agent endpoint', (
   for (const command of ['dev', 'test', 'typecheck', 'build']) {
     assert.ok(packageJson.scripts?.[command], `missing server script: ${command}`);
   }
-  assert.match(server, /hostname:\s*'127\.0\.0\.1'/);
-  assert.match(server, /port:\s*62586/);
+  assert.match(server, /hostname:\s*process\.env\.HOST\s*\?\?\s*'127\.0\.0\.1'/);
+  assert.match(server, /port:\s*Number\(process\.env\.PORT\s*\?\?\s*62586\)/);
   assert.match(read('apps/server/src/agent-client.ts'), /http:\/\/127\.0\.0\.1:62687\/chat\/asset-creation-agent/);
   assert.match(originMiddleware, /http:\/\/localhost:5173/);
   assert.match(originMiddleware, /'null'/);

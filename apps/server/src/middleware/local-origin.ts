@@ -11,18 +11,21 @@ const developmentOrigin = 'http://localhost:5173';
  *  2. 打包后的 Electron：页面通过 file:// 加载，Origin 可能为 'null' 或省略；
  *     同时要求 User-Agent 含 Electron，避免普通网页借 opaque origin 访问本地 API。
  *  3. Web 使用 AGENT3D_WEB_ORIGIN 精确匹配来源，包含协议和端口。
+ *     同时保留 IP、根域名、www 入口时，可用英文逗号分隔；不是允许任意域名。
  */
 export function createLocalOriginMiddleware() {
-  const webOrigin = process.env.AGENT3D_WEB_ORIGIN ? new URL(process.env.AGENT3D_WEB_ORIGIN).origin : undefined;
+  const webOrigins = (process.env.AGENT3D_WEB_ORIGIN ?? '').split(',')
+    .map(value => value.trim()).filter(Boolean).map(value => new URL(value).origin);
+  const webHosts = webOrigins.map(value => new URL(value).host);
   return createMiddleware(async (context, next) => {
     const origin = context.req.header('Origin');
     const isPackagedElectron = (origin === 'null' || origin === undefined)
       && context.req.header('User-Agent')?.includes('Electron/');
     // 同域的图片及 GET 请求可能省略 Origin。只允许配置站点的 Host，
     // 修改操作仍要求 Origin，避免外部页面借用户登录态发起写请求。
-    const isSameSiteRead = !origin && webOrigin && ['GET', 'HEAD'].includes(context.req.method)
-      && context.req.header('Host') === new URL(webOrigin).host;
-    const isWebOrigin = webOrigin !== undefined && origin === webOrigin;
+    const isSameSiteRead = !origin && ['GET', 'HEAD'].includes(context.req.method)
+      && webHosts.includes(context.req.header('Host') ?? '');
+    const isWebOrigin = origin !== undefined && webOrigins.includes(origin);
     if (origin !== developmentOrigin && !isWebOrigin && !isPackagedElectron && !isSameSiteRead) {
       return context.json(apiErrorSchema.parse({
         code: 'UNAUTHORIZED',

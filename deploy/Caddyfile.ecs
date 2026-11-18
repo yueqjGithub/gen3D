@@ -1,4 +1,4 @@
-# 无自有域名的 ECS：显式使用支持公网 IP 的 ACME shortlived 证书。
+# ECS 同时提供 IP 和域名入口。IP 使用 ACME shortlived 证书，域名使用常规证书。
 # /data 持久卷保存账户和证书，Caddy 自动续期；不要把它当成六天后手动重发。
 {
 	# 浏览器访问 IP 不发送 SNI；Docker 内看到的是私网 IP，需显式选择公网证书。
@@ -9,6 +9,30 @@
 	tls {
 		issuer acme https://acme-v02.api.letsencrypt.org/directory {
 			profile shortlived
+		}
+	}
+	# 直接进入应用登录页；用户身份和 API 权限由 Server 校验。
+	@api path /api /api/*
+	handle @api {
+		request_body {
+			max_size 21MB
+		}
+		reverse_proxy server:62586 {
+			flush_interval -1
+		}
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# 域名证书：使用 TLS-ALPN 验证，避免域名 HTTP 访问受备案拦截影响。
+mymaster3d.online, www.mymaster3d.online {
+	tls {
+		issuer acme https://acme-v02.api.letsencrypt.org/directory {
+			disable_http_challenge
 		}
 	}
 	# 直接进入应用登录页；用户身份和 API 权限由 Server 校验。

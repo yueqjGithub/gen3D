@@ -7,6 +7,20 @@ app.use('*', createLocalOriginMiddleware());
 app.get('/', (context) => context.text('ok'));
 
 describe('local renderer origin boundary', () => {
+  it('allows only explicitly configured IP and domain origins', async () => {
+    vi.stubEnv('AGENT3D_WEB_ORIGIN', 'https://47.109.49.110, https://mymaster3d.online, https://www.mymaster3d.online');
+    try {
+      const web = new Hono();
+      web.use('*', createLocalOriginMiddleware());
+      web.all('/', context => context.text('ok'));
+      for (const origin of ['https://47.109.49.110', 'https://mymaster3d.online', 'https://www.mymaster3d.online']) {
+        expect((await web.request('/', { method: 'POST', headers: { Origin: origin } })).status).toBe(200);
+        expect((await web.request('/', { headers: { Host: new URL(origin).host } })).status).toBe(200);
+      }
+      expect((await web.request('/', { method: 'POST', headers: { Origin: 'https://mymaster3d.online.attacker.example' } })).status).toBe(403);
+      expect((await web.request('/', { method: 'POST', headers: { Host: 'mymaster3d.online' } })).status).toBe(403);
+    } finally { vi.unstubAllEnvs(); }
+  });
   it('accepts the configured Web origin and same-site images while rejecting cross-site writes', async () => {
     vi.stubEnv('AGENT3D_WEB_ORIGIN', 'https://workbench.example.com');
     try {

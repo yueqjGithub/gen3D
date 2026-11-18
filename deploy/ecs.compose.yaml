@@ -9,6 +9,7 @@ services:
       - ../.env.supabase
       - ../.env.server
     environment:
+      # 同时使用 IP / 根域名 / www 时，用英文逗号列出完整 HTTPS 来源。
       AGENT3D_WEB_ORIGIN: ${PUBLIC_ORIGIN:?请设置 Web 的完整 HTTPS 地址}
     # 这个镜像已包含 tini，内部仍是 Server 和 Agent 两个独立 Node 进程。
     # 不发布 62586/62687，只允许 Web 容器经 Docker 网络访问 Server。

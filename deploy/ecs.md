@@ -1,5 +1,13 @@
 # 阿里云 ECS 发布
 
+## 新域名接入进度（2026-11-18）
+
+用户新购域名 mymaster3d.online，已实名认证，尚未完成 ICP 备案。当前已检查 Google 与 Cloudflare 公共 DNS，根域名和 www 均未解析，NS 委派也暂不可见（NXDOMAIN）；控制台截图仅有 www 的 A 记录指向 47.109.49.110。需要补充 @ 的 A 记录，并在域名注册管理页确认 DNS 服务器为该域名实际分配的 dns15.hichina.com、dns16.hichina.com；如果已经一致，则等待新注册域名的委派同步，不能仅凭提示认定 NS 一定填错。
+
+当前 IP 站点与 ECS 服务均正常，未为了接入尚未解析的新域名重启后端或停用 IP 入口。DNS 正常后，还需配置 Caddy 的域名站点/证书以及 Server 的允许来源，才能保证 HTTPS、登录、图片/GLB 和 SSE 均使用新地址。域名尚未配置为正式入口。
+
+ECS 位于成都，域名在该实例上对外提供网站服务需完成 ICP 备案。实名认证不等于备案。参考：[阿里云网站部署说明](https://www.alibabacloud.com/help/en/ecs/user-guide/build-a-website/)、[新注册域名与 DNS 同步](https://help.aliyun.com/zh/dws/getting-started)。
+
 目标机器：47.109.49.110，Alibaba Cloud Linux 3，2 核 / 2 GiB，Docker 26.1.3、Compose 2.27.0。已通过 SSH 上传并导入镜像，在 /opt/agent3d 启动 Node 后端，健康检查通过。后端镜像在 ECS 解包后约 1.29 GB，Web 镜像约 67 MB。
 
 当前状态：已上线，入口为 [https://47.109.49.110](https://47.109.49.110)。安全组已放行 80/443，两个容器持续运行。HTTP 自动跳转 HTTPS，直接展示应用登录页；未登录访问业务 API 仍返回 401。

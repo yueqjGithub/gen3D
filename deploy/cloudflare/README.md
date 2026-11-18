@@ -13,7 +13,7 @@ Cloudflare Containers 要求 Workers Paid。2026-11-18 检查时，此账号仍�
 - 根目录 Dockerfile 的 backend 目标打包两个普通 Node 服务。
 - deploy/start-backend.mjs 等待 Agent 端口就绪后启动 Server，并转发退出信号。
 - wrangler.jsonc 指定独立的新站点 agent3d-node，不覆盖旧 agent3d 站点。
-- .github/workflows/container-check.yml 在 codex/deploy-node 分支构建 Linux 镜像，实际启动两个服务；只使用虚拟配置，不把生产密钥放入构建。
+- .github/workflows/container-check.yml 在 codex/deploy-node 分支构建 Linux 镜像，实际启动两个服务；只使用临时 PostgreSQL、测试证书和虚拟 Storage 配置，不把生产密钥放入构建。Mastra 启动需要读取原生表，因此检查前会在临时数据库初始化原生表，不能只填一个不存在的数据库地址。
 
 本地检查入口类型：
 

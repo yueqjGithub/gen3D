@@ -8,6 +8,10 @@
 
 Cloudflare 账号目前为 Free，Containers API 明确要求 Workers Paid；尚未开通订阅或产生容器费用。本机没有 Docker，因此通过 GitHub Actions 验证 Linux 镜像构建与两个进程启动。工作流只使用虚拟配置，不包含生产密钥。新站点名称为 agent3d-node，验证通过前保留旧站点。
 
+验证结果：Web 构建、项目类型检查、网关类型检查与 Wrangler 本地 dry-run 均通过。[Linux 容器 CI](https://github.com/yueqjGithub/gen3D/actions/runs/44239098591) 已成功构建约 363 MB 镜像，并使用隔离的 PostgreSQL 和测试证书实际启动两个 Node 服务，确认 Server 登录探针返回 401、Agent API 返回 200。CI 没有访问正式 Supabase 或模型供应商；这不是线上聊天全流程验证。代码已推送独立分支 codex/deploy-node，develop 未改动。
+
+后续需用户在 Cloudflare 控制台开通 Workers Paid（基础月费 5 美元及可能的按量费用），再推送容器镜像、注入运行时 secrets、发布新站点并做线上验证。完成前不能把“容器 CI 通过”表述为“已上线”。
+
 ## 1. 当前项目组成
 
 | 目录 | 职责 |

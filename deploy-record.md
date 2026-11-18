@@ -4,7 +4,9 @@
 
 ### 2026-11-18 已上线：阿里云 ECS
 
-当前入口：[https://47.109.49.110](https://47.109.49.110)。普通 Node Server/Agent 已部署到阿里云 ECS（2 核 / 2 GiB）的 /opt/agent3d，Web 由 Caddy 提供，继续使用已有 Supabase。详细说明见 [ECS 部署记录](deploy/ecs.md)。按用户要求已移除 Caddy Basic Auth，直接进入应用登录页；只需原有应用账号，业务 API 仍要求登录。
+当前入口：[https://mymaster3d.online](https://mymaster3d.online)，同时保留 [www](https://www.mymaster3d.online) 与 [IP](https://47.109.49.110) 入口。普通 Node Server/Agent 已部署到阿里云 ECS（2 核 / 2 GiB）的 /opt/agent3d，Web 由 Caddy 提供，继续使用已有 Supabase。详细说明见 [ECS 部署记录](deploy/ecs.md)。按用户要求已移除 Caddy Basic Auth，直接进入应用登录页；只需原有应用账号，业务 API 仍要求登录。
+
+域名证书已由 Caddy 通过 TLS-ALPN 自动签发并接管续期，根域名与 www 的 Let's Encrypt 证书均已严格验证。Server 的来源配置增加逗号分隔的精确列表，同时接受上述三个 HTTPS 来源。已发布 e1d583e 镜像，[构建与启动验证](https://github.com/yueqjGithub/gen3D/actions/runs/44290249198) 通过；Server 56 项测试、类型与生产构建通过。真实浏览器已逐一验证三个入口的登录和 GLB 预览，根域名真实 Agnes SSE 聊天也已通过。域名尚未完成 ICP 备案；HTTP 曾返回阿里云备案拦截页，证书签发不等于备案完成，应继续办理。
 
 实际运行两个容器：web（Caddy 与静态页面）和 server（独立的 Server、Agent 两个 Node 进程）。公网只开放网站 80/443，Agent 管理端口不公开。安全组已由用户放行，IP 证书已由 Let's Encrypt YE2 签发；Caddy 配置了自动续期，并通过 default_sni 处理浏览器裸 IP 访问。没有关闭 TLS 验证。
 
@@ -200,7 +202,7 @@ HTTPS / Caddy + Web
 
 本机没有 Docker，镜像在 GitHub Actions 的 Linux runner 构建。CI 使用临时 PostgreSQL 和专用测试证书验证真实启动，不接触生产凭据；镜像随后已导入 ECS，Compose 启动和真实浏览器流程也已验证。
 
-旧站点 https://agent3d.agent3d-workers-compatibility.workers.dev 保留原 Workers 版本。当前推荐入口是 ECS 的 https://47.109.49.110，没有把旧 Worker 删除或改成新后端。
+旧站点 https://agent3d.agent3d-workers-compatibility.workers.dev 保留原 Workers 版本。当前推荐入口是 ECS 的 https://mymaster3d.online，没有把旧 Worker 删除或改成新后端。
 
 如果继续在 Cloudflare 上运行普通 Node，应选择 Containers，而不是将 Workers 的 Node API 兼容当作完整 Linux Node。Containers 要求 Workers Paid，并有容器用量费用；部署入口仍需少量平台路由配置，但无需重新复制业务逻辑。目前没有开通付费套餐、创建 Container 或配置自动发布。
 

@@ -1,16 +1,22 @@
 # 阿里云 ECS 发布
 
-## 新域名接入进度（2026-11-18）
+## 域名证书与接入结果（2026-11-18）
 
-用户新购域名 mymaster3d.online，已实名认证，尚未完成 ICP 备案。当前已检查 Google 与 Cloudflare 公共 DNS，根域名和 www 均未解析，NS 委派也暂不可见（NXDOMAIN）；控制台截图仅有 www 的 A 记录指向 47.109.49.110。需要补充 @ 的 A 记录，并在域名注册管理页确认 DNS 服务器为该域名实际分配的 dns15.hichina.com、dns16.hichina.com；如果已经一致，则等待新注册域名的委派同步，不能仅凭提示认定 NS 一定填错。
+用户新购域名 mymaster3d.online，已实名认证，尚未完成 ICP 备案。最初公共 DNS 返回 NXDOMAIN，随后 NS 委派与 @ / www 的 A 记录均已生效，两个域名都指向 47.109.49.110。权威 DNS 为 dns15.hichina.com、dns16.hichina.com。
 
-当前 IP 站点与 ECS 服务均正常，未为了接入尚未解析的新域名重启后端或停用 IP 入口。DNS 正常后，还需配置 Caddy 的域名站点/证书以及 Server 的允许来源，才能保证 HTTPS、登录、图片/GLB 和 SSE 均使用新地址。域名尚未配置为正式入口。
+按用户要求，Caddy 已为 mymaster3d.online、www.mymaster3d.online 自动申请到 Let's Encrypt 证书。签发时已在 ECS 内严格验证证书链和域名 SAN，两个证书分别有效至 2027-02-16 09:57:55 UTC、2027-02-16 09:57:53 UTC。Caddy 已取得续期信息，账户与证书保存在 caddy-data 持久卷中，无需导入阿里云个人测试证书。
+
+域名 HTTP 请求曾实际返回阿里云的 Non-compliance ICP Filing 页面，因此域名签发配置使用 ACME TLS-ALPN（443 端口）验证，disable_http_challenge 只关闭域名的 HTTP 验证；IP 入口仍保留原 shortlived 配置。证书签发不代表 ICP 备案已经完成，域名应直接使用 HTTPS，备案仍按阿里云流程继续办理。
+
+域名支持镜像已从 e1d583e 构建并发布，实际 [CI 构建与启动检查](https://github.com/yueqjGithub/gen3D/actions/runs/44290249198) 通过。Server 的 AGENT3D_WEB_ORIGIN 支持用英文逗号分隔多个完整来源，线上 PUBLIC_ORIGIN 为 https://47.109.49.110,https://mymaster3d.online,https://www.mymaster3d.online。精确允许这三个来源，便于保留 IP 入口；请求的 Origin 由 Server 校验，不由网关改写。
+
+Server 56 项测试、类型检查和生产构建通过。发布后用保持证书校验的真实 Chrome，分别验证根域名、www 和 IP 的页面、应用登录、未登录 API 401、登录后 API 200、已保存 GLB 预览，没有前端 JS 异常。另在根域名实际发起 Agnes 聊天，收到原生 text/event-stream 和回复，验证后只删除本次独立的测试会话。
 
 ECS 位于成都，域名在该实例上对外提供网站服务需完成 ICP 备案。实名认证不等于备案。参考：[阿里云网站部署说明](https://www.alibabacloud.com/help/en/ecs/user-guide/build-a-website/)、[新注册域名与 DNS 同步](https://help.aliyun.com/zh/dws/getting-started)。
 
 目标机器：47.109.49.110，Alibaba Cloud Linux 3，2 核 / 2 GiB，Docker 26.1.3、Compose 2.27.0。已通过 SSH 上传并导入镜像，在 /opt/agent3d 启动 Node 后端，健康检查通过。后端镜像在 ECS 解包后约 1.29 GB，Web 镜像约 67 MB。
 
-当前状态：已上线，入口为 [https://47.109.49.110](https://47.109.49.110)。安全组已放行 80/443，两个容器持续运行。HTTP 自动跳转 HTTPS，直接展示应用登录页；未登录访问业务 API 仍返回 401。
+当前状态：已上线，推荐入口为 [https://mymaster3d.online](https://mymaster3d.online)。[www 入口](https://www.mymaster3d.online) 和 [IP 入口](https://47.109.49.110) 同时保留，数据共用现有 Supabase。两个容器持续运行，直接展示应用登录页，未登录访问业务 API 返回 401。IP 的 HTTP 跳转已验证；域名的普通 HTTP 仍可能受备案拦截，建议直接访问上述 HTTPS 地址。
 
 已用真实 Chrome 验证登录、新建会话、Agnes SSE、选项提问、自定义回答恢复、手动工具确认、Three.js iframe 生成、Supabase 保存、批准、下载与刷新读取；继续要求修改花瓶颜色时，Agent 重新调用生成工具，产生新的深蓝色模型和 GLB。首次下载 515272 字节，修改后 515276 字节，均校验 GLB 2.0 头和长度。刷新未再次执行上传。测试使用独立账号，不修改用户已有会话。
 
@@ -46,7 +52,7 @@ docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml logs --tail=100
 
 ## HTTPS 与应用登录
 
-用户暂无域名，因此使用 https://47.109.49.110。deploy/Caddyfile.ecs 显式设置 Let's Encrypt ACME shortlived profile，申请公网 IP 证书，Caddy 持久卷保存证书并自动续期。无需改成自签证书或去掉登录 Cookie 的 Secure 属性。参考 [Let's Encrypt IP 证书说明](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)。
+最初先使用 https://47.109.49.110，现新增根域名和 www 入口。deploy/Caddyfile.ecs 为公网 IP 显式设置 Let's Encrypt ACME shortlived profile，域名则使用常规 ACME 证书；三者均由 Caddy 持久卷保存并自动续期。无需改成自签证书或去掉登录 Cookie 的 Secure 属性。参考 [Let's Encrypt IP 证书说明](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)。
 
 本次实际证书签发机构为 Let's Encrypt YE2，SAN 为 IP Address:47.109.49.110，首次证书到期时间为 2026-11-24 20:31:54 UTC。Caddy 已取得续期窗口信息并自动管理续期；此日期不是需要用户手工更新的部署截止日期。不要删除 caddy-data 卷，保持 80/443 开放。
 
@@ -58,6 +64,6 @@ docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml logs --tail=100
 
 移除后已用未设置任何 HTTP 认证凭据的新浏览器会话验证：首页直接返回 200 并展示登录表单，未登录的会话 API 仍返回 401，应用账户登录后会话 API 返回 200，已有 GLB 预览正常。
 
-模型 API Key 保存在浏览器 localStorage，按站点来源隔离。原 Cloudflare 地址中的 Key 不会自动出现在新 IP 地址的页面，首次使用需在新页面的模型设置中重新填写；应用账户、会话与资产仍来自同一个 Supabase。最终空闲检查：后端约 304 MiB、Web 约 33 MiB，Docker 开机启动已启用，两个服务均设置 unless-stopped 重启策略。
+模型 API Key 保存在浏览器 localStorage，按站点来源隔离。Cloudflare、IP、根域名和 www 页面不会自动共享本地 Key，首次切换入口需在新页面的模型设置中重新填写；应用账户、会话与资产仍来自同一个 Supabase。首次空闲检查：后端约 304 MiB、Web 约 33 MiB，Docker 开机启动已启用，两个服务均设置 unless-stopped 重启策略。
 
-镜像由 [GitHub Actions](https://github.com/yueqjGithub/gen3D/actions/runs/44241672091) 从 be12437 构建；部署入口配置位于 codex/deploy-node 最新提交，Caddyfile 通过只读挂载更新，无需为网关配置修改重新打包业务镜像。旧 Cloudflare 站点未删除，当前推荐使用 ECS 新入口。未构建 Windows 安装包。
+初次镜像由 [GitHub Actions](https://github.com/yueqjGithub/gen3D/actions/runs/44241672091) 从 be12437 构建，当前运行的是 e1d583e 的域名支持版。更新前保留了 agent3d-backend:before-domain、agent3d-web:before-domain 镜像标签和权限为 600 的 deploy/.env.before-domain，便于回退来源配置。部署入口配置位于 codex/deploy-node 最新提交，Caddyfile 通过只读挂载更新；纯网关配置修改无需重新打包业务镜像。旧 Cloudflare 站点未删除，当前推荐使用 ECS 新入口。未构建 Windows 安装包。

@@ -27,8 +27,35 @@ jobs:
       - name: Check both independent Node processes
         shell: bash
         run: |
-          docker run -d --name agent3d-check -p 62586:62586 \
-            -e DATABASE_URL=postgresql://check:check@127.0.0.1:5432/postgres \
+          # Mastra 启动会读取原生表。临时 PG 仅存在于本次 runner，绝不连接正式 Supabase。
+          # 为临时 PG 生成专用证书，继续使用业务代码原本的严格 TLS 校验。
+          mkdir -p "$RUNNER_TEMP/agent3d-tls"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=db' -addext 'subjectAltName=DNS:db' \
+            -keyout "$RUNNER_TEMP/agent3d-tls/server.key" \
+            -out "$RUNNER_TEMP/agent3d-tls/server.crt"
+          sudo chown 999:999 "$RUNNER_TEMP/agent3d-tls/server.key"
+          sudo chmod 600 "$RUNNER_TEMP/agent3d-tls/server.key"
+          docker network create agent3d-check
+          docker run -d --name agent3d-db --network agent3d-check --network-alias db \
+            -e POSTGRES_USER=check -e POSTGRES_PASSWORD=check \
+            -v "$RUNNER_TEMP/agent3d-tls:/tls:ro" \
+            postgres:17-bookworm -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key
+          for attempt in $(seq 1 30); do
+            if docker exec agent3d-db pg_isready -U check -d postgres; then break; fi
+            sleep 2
+          done
+          docker run --rm --network agent3d-check --workdir /app/apps/server \
+            -v "$RUNNER_TEMP/agent3d-tls/server.crt:/tmp/ci.crt:ro" \
+            --entrypoint node agent3d-backend:check --input-type=module -e '
+              import { PostgresStore } from "@mastra/pg";
+              import { readFileSync } from "node:fs";
+              const store = new PostgresStore({id:"container-ci",connectionString:"postgresql://check:check@db:5432/postgres",schemaName:"agent3d",ssl:{ca:readFileSync("/tmp/ci.crt","utf8"),rejectUnauthorized:true}});
+              try { await store.init(); } finally { await store.close(); }
+            '
+          docker run -d --name agent3d-check --network agent3d-check -p 62586:62586 \
+            -v "$RUNNER_TEMP/agent3d-tls/server.crt:/app/deploy/supabase-ca.crt:ro" \
+            -e DATABASE_URL=postgresql://check:check@db:5432/postgres \
             -e SUPABASE_URL=https://example.invalid \
             -e SUPABASE_SECRET_KEY=check-only \
             -e SESSION_SECRET=check-only \
@@ -45,7 +72,10 @@ jobs:
           if [ "$ready" != true ]; then docker logs agent3d-check; exit 1; fi
           docker image inspect agent3d-backend:check --format '{{.Size}} bytes'
           docker stop agent3d-check
+          docker stop agent3d-db
           echo 'Node Server and independent Mastra Agent started successfully.' >> "$GITHUB_STEP_SUMMARY"
       - name: Container logs on failure
         if: failure()
-        run: docker logs agent3d-check || true
+        run: |
+          docker logs agent3d-check || true
+          docker logs agent3d-db || true

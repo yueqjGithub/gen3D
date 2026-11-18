@@ -31,4 +31,4 @@ Compose 将 CA 路径覆盖为 /app/deploy/supabase-ca.crt，不把 Windows 路�
 
 ## Cloudflare
 
-当前旧公网站点尚未切换。Workers 不是完整的 Node 常驻服务；若选择 Cloudflare Containers，需 Paid 方案及容器用量费用，还需要配置平台入口。没有为本次结构调整自动开通付费服务或删除旧站点。
+当前新站点已运行在阿里云 ECS，旧 Workers 站点保留。ECS 部署不依赖 Cloudflare Containers，也没有开通 Workers Paid；deploy/cloudflare 仅保留此前容器方案配置，不参与当前站点的请求链路。

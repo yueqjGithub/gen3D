@@ -1,5 +1,10 @@
 # 无自有域名的 ECS：显式使用支持公网 IP 的 ACME shortlived 证书。
 # /data 持久卷保存账户和证书，Caddy 自动续期；不要把它当成六天后手动重发。
+{
+	# 浏览器访问 IP 不发送 SNI；Docker 内看到的是私网 IP，需显式选择公网证书。
+	default_sni {$SITE_ADDRESS}
+}
+
 {$SITE_ADDRESS} {
 	tls {
 		issuer acme https://acme-v02.api.letsencrypt.org/directory {

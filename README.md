@@ -50,7 +50,7 @@ Web 开发页为 http://localhost:5173，Server 为 http://127.0.0.1:62586，Age
 
 ## 部署与检查
 
-Docker 构建与启动说明见 [Web 部署](docs/web-deployment.md)。当前仍在从 Workers 部署向 Node 服务迁移，旧公网 URL 尚未切换。
+当前已部署到阿里云 ECS：[https://47.109.49.110](https://47.109.49.110)，使用 Caddy + 普通 Node Server/Agent + Supabase。运行、日志、HTTPS 和访问凭据说明见 [ECS 部署记录](deploy/ecs.md)，其他 Docker 启动方式见 [Web 部署](docs/web-deployment.md)。旧 Workers 站点保留，不作为当前推荐入口。
 
 ```powershell
 pnpm --filter @agent3d/server build

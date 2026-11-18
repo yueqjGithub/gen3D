@@ -2,7 +2,11 @@
 
 目标机器：47.109.49.110，Alibaba Cloud Linux 3，2 核 / 2 GiB，Docker 26.1.3、Compose 2.27.0。已通过 SSH 上传并导入镜像，在 /opt/agent3d 启动 Node 后端，健康检查通过。后端镜像在 ECS 解包后约 1.29 GB，Web 镜像约 67 MB。
 
-当前状态：Server、独立 Mastra Agent、Supabase 严格 TLS 数据库连接、原生会话/消息表与私有存储桶检查均已通过。外部 TCP 80/443 超时，ACME 证书挑战也报告连接超时；主机 firewalld 未启用，需控制台放行安全组。等待期间已暂停 Web，防止重复失败证书申请；后端保持运行。尚未完成可信 HTTPS 和浏览器端全流程验收。
+当前状态：已上线，入口为 [https://47.109.49.110](https://47.109.49.110)。安全组已放行 80/443，两个容器持续运行。HTTP 自动跳转 HTTPS；未提供站点访问密码返回 401，这是预期的访问保护，不是启动失败。
+
+已用真实 Chrome 验证登录、新建会话、Agnes SSE、选项提问、自定义回答恢复、手动工具确认、Three.js iframe 生成、Supabase 保存、批准、下载与刷新读取；继续要求修改花瓶颜色时，Agent 重新调用生成工具，产生新的深蓝色模型和 GLB。首次下载 515272 字节，修改后 515276 字节，均校验 GLB 2.0 头和长度。刷新未再次执行上传。测试使用独立账号，不修改用户已有会话。
+
+Studio 使用的原生 /api/observability/traces/light 接口返回 200，能够读取 Supabase Trace，没有 stored.trim 报错。Agent 管理接口仍只在容器内开放。
 
 ## 运行方式
 
@@ -32,12 +36,18 @@ docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml ps
 docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml logs --tail=100 -f server web
 ```
 
-## 发布前仍需取得的信息
+## HTTPS 与入口凭据
 
 用户暂无域名，因此使用 https://47.109.49.110。deploy/Caddyfile.ecs 显式设置 Let's Encrypt ACME shortlived profile，申请公网 IP 证书，Caddy 持久卷保存证书并自动续期。无需改成自签证书或去掉登录 Cookie 的 Secure 属性。参考 [Let's Encrypt IP 证书说明](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)。
 
-安全组入方向需允许 TCP 80 和 TCP 443，来源 0.0.0.0/0；保留原 SSH 规则，不开放全部端口。控制台修改完成后在服务器 /opt/agent3d 执行上面的 up -d 命令即可恢复 Web 和证书申请，再验证浏览器信任链。
+本次实际证书签发机构为 Let's Encrypt YE2，SAN 为 IP Address:47.109.49.110，首次证书到期时间为 2026-11-24 20:31:54 UTC。Caddy 已取得续期窗口信息并自动管理续期；此日期不是需要用户手工更新的部署截止日期。不要删除 caddy-data 卷，保持 80/443 开放。
+
+浏览器访问裸 IP 通常不发送 SNI，而 Docker 容器看到的本地地址是私网地址。因此全局 default_sni 显式选用 SITE_ADDRESS 对应的公网证书；缺少它时会出现证书已经签发但浏览器 SSL_PROTOCOL_ERROR 的现象。本次通过配置修复，没有关闭证书校验。ECS 容器内部和本机真实浏览器均已验证可信连接。
+
+安全组入方向已允许 TCP 80 和 TCP 443，来源 0.0.0.0/0；保留原 SSH 规则，不开放全部端口。最初因安全组未放行，证书挑战超时，曾暂停 Web 防止重复失败申请；该问题已解决，Web 已恢复。
 
 本次没有覆盖既有服务或删除数据库。普通业务不使用 root SSH 密码：站点入口另有随机生成的 owner 访问密码，保存在本机忽略提交的 .verification/ecs-access.txt；通过入口后继续使用应用原有账户。不要把这个文件或服务器环境文件提交到 Git。
 
-上线后检查登录、历史会话、SSE、手动工具确认、选项回答、iframe 预览/导出及刷新后重新读取 GLB，再记录最终域名和版本。旧 Cloudflare 站点在新站点验证完成前保留。
+模型 API Key 保存在浏览器 localStorage，按站点来源隔离。原 Cloudflare 地址中的 Key 不会自动出现在新 IP 地址的页面，首次使用需在新页面的模型设置中重新填写；应用账户、会话与资产仍来自同一个 Supabase。最终空闲检查：后端约 304 MiB、Web 约 33 MiB，Docker 开机启动已启用，两个服务均设置 unless-stopped 重启策略。
+
+镜像由 [GitHub Actions](https://github.com/yueqjGithub/gen3D/actions/runs/44241672091) 从 be12437 构建；部署入口配置位于 codex/deploy-node 最新提交，Caddyfile 通过只读挂载更新，无需为网关配置修改重新打包业务镜像。旧 Cloudflare 站点未删除，当前推荐使用 ECS 新入口。未构建 Windows 安装包。

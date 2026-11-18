@@ -2,19 +2,19 @@
 
 更新：2026-11-18。本记录对应本次精简后的 Node + Supabase 工程。2026-11-17 的 Workers 部署经过保存在 [历史记录](docs/history/workers-deployment-2026-11-17.md)，不再作为当前工程的启动方式。
 
-### 2026-11-18 发布准备
+### 2026-11-18 已上线：阿里云 ECS
 
-后续用户已改选阿里云 ECS（47.109.49.110，2 核 / 2 GiB）。部署目标改为 Docker + Caddy + 普通 Node，继续使用现有 Supabase，不再以开通 Cloudflare Paid 为前提。SSH 端口已确认可达，尚待登录方式及 HTTPS 域名。ECS 配置及步骤见 [ECS 部署说明](deploy/ecs.md)，以下 Containers 检查结果保留为此前方案记录。
+当前入口：[https://47.109.49.110](https://47.109.49.110)。普通 Node Server/Agent 已部署到阿里云 ECS（2 核 / 2 GiB）的 /opt/agent3d，Web 由 Caddy 提供，继续使用已有 Supabase。详细说明见 [ECS 部署记录](deploy/ecs.md)。站点第一层访问凭据保存在本机忽略提交的 .verification/ecs-access.txt，通过后仍使用应用自己的账户。
 
-ECS 后续进展：已取得 SSH 登录方式并实际部署到 /opt/agent3d。镜像校验、导入、Caddy 2.11.9 配置校验、Node 健康检查、独立 Agent API、Supabase 严格 TLS 和私有 bucket 检查均通过。没有域名，采用公网 IP 的 Let's Encrypt shortlived 证书，自动续期。当前安全组尚未放行 TCP 80/443，外网和 ACME 挑战均超时，暂时停止 Web 的失败重试，后端继续运行。待用户放行后恢复 Web，再验证可信 HTTPS 及真实浏览器流程；不能把内部检查通过写成外网已可使用。
+实际运行两个容器：web（Caddy 与静态页面）和 server（独立的 Server、Agent 两个 Node 进程）。公网只开放网站 80/443，Agent 管理端口不公开。安全组已由用户放行，IP 证书已由 Let's Encrypt YE2 签发；Caddy 配置了自动续期，并通过 default_sni 处理浏览器裸 IP 访问。没有关闭 TLS 验证。
 
-当前线上仍为原 agent3d Worker，新 Node 版本尚未切换。新增 deploy/cloudflare 的薄入口，将普通 Node Server/Agent 放在同一个 Cloudflare Container，Web 由静态资源绑定提供，Supabase 继续使用已有项目。它不是新增的业务 workspace package。详细配置见 [容器部署说明](deploy/cloudflare/README.md)。
+真实外网 Chrome 已完成登录、新建会话、Agnes SSE、选项提问与自定义回答、手动工具确认、客户端 iframe 建模、GLB 上传 Supabase、批准、下载与刷新读取。后续改色请求再次调用生成工具，产生新资产，预览由青绿色变成深蓝色；首次与修改版 GLB 分别为 515272、515276 字节，GLB 2.0 头及总长度均验证通过。刷新没有重新上传。修正验证脚本只向顶层页面写入 API Key 后，浏览器没有 JS 异常；未为通过测试修改业务代码。
 
-Cloudflare 账号目前为 Free，Containers API 明确要求 Workers Paid；尚未开通订阅或产生容器费用。本机没有 Docker，因此通过 GitHub Actions 验证 Linux 镜像构建与两个进程启动。工作流只使用虚拟配置，不包含生产密钥。新站点名称为 agent3d-node，验证通过前保留旧站点。
+Studio 使用的原生 /api/observability/traces/light 返回 200，可读已有与本次调用的 Trace，没有 stored.trim 错误。验证使用独立测试账号，用户已有会话和资产未改动。
 
-验证结果：Web 构建、项目类型检查、网关类型检查与 Wrangler 本地 dry-run 均通过。[Linux 容器 CI](https://github.com/yueqjGithub/gen3D/actions/runs/44239098591) 已成功构建约 363 MB 镜像，并使用隔离的 PostgreSQL 和测试证书实际启动两个 Node 服务，确认 Server 登录探针返回 401、Agent API 返回 200。CI 没有访问正式 Supabase 或模型供应商；这不是线上聊天全流程验证。代码已推送独立分支 codex/deploy-node，develop 未改动。
+镜像由 [GitHub Actions](https://github.com/yueqjGithub/gen3D/actions/runs/44241672091) 从 be12437 构建，再用 SSH 上传并校验归档。运行时密钥未进入 Git 或镜像。代码位于 codex/deploy-node，develop 未改动。未构建 Windows 安装包。
 
-后续需用户在 Cloudflare 控制台开通 Workers Paid（基础月费 5 美元及可能的按量费用），再推送容器镜像、注入运行时 secrets、发布新站点并做线上验证。完成前不能把“容器 CI 通过”表述为“已上线”。
+此前 Cloudflare Containers 方案因账号尚未开通 Workers Paid 而没有发布。deploy/cloudflare 仅保留该方案配置，不参与当前请求链路，不需要开通此套餐。旧 Worker 站点、Hyperdrive 和数据没有删除。
 
 ## 1. 当前项目组成
 
@@ -189,7 +189,7 @@ $env:NO_PROXY='localhost,127.0.0.1,::1'
 
 ## 10. 部署结构与当前迁移状态
 
-当前代码适合普通 Node / Docker，Dockerfile 提供 web、server、agent 三个目标。Compose 使用 Supabase，不再有共享 SQLite 数据卷，也没有 Chromium 安装和浏览器沙箱配置。
+Dockerfile 提供 web、server、agent、backend 四个目标。ECS 使用 backend（两个独立 Node 进程）和 web，编排文件为 deploy/ecs.compose.yaml；根 compose.yaml 仍保留三个独立容器的通用部署方式。两种方式都使用 Supabase，没有共享 SQLite 数据卷或 Chromium。
 
 ```text
 HTTPS / Caddy + Web
@@ -198,23 +198,29 @@ HTTPS / Caddy + Web
 两后端 → Supabase
 ```
 
-本机尚未安装 Docker，因此不能声称 docker build 或 compose 已验证通过。普通 Node 和 Web 可独立构建验证。
+本机没有 Docker，镜像在 GitHub Actions 的 Linux runner 构建。CI 使用临时 PostgreSQL 和专用测试证书验证真实启动，不接触生产凭据；镜像随后已导入 ECS，Compose 启动和真实浏览器流程也已验证。
 
-旧站点 https://agent3d.agent3d-workers-compatibility.workers.dev 仍是之前的 Workers 版本，本次没有删除 Worker、Hyperdrive、数据库或切换流量。本地修改不等于线上已更新。
+旧站点 https://agent3d.agent3d-workers-compatibility.workers.dev 保留原 Workers 版本。当前推荐入口是 ECS 的 https://47.109.49.110，没有把旧 Worker 删除或改成新后端。
 
 如果继续在 Cloudflare 上运行普通 Node，应选择 Containers，而不是将 Workers 的 Node API 兼容当作完整 Linux Node。Containers 要求 Workers Paid，并有容器用量费用；部署入口仍需少量平台路由配置，但无需重新复制业务逻辑。目前没有开通付费套餐、创建 Container 或配置自动发布。
 
-新部署验证后再处理旧 Worker。GitHub 已有远端，但没有配置 push 自动上线；当前代码修改也尚未自动提交或推送。
+codex/deploy-node 的 push 会构建并验证镜像，再生成保留 3 天的 ECS 镜像下载产物；不会自动登录 ECS 发布。当前发布通过 SSH 完成，新版本也需明确执行镜像导入和 Compose 更新。部署入口配置通过只读挂载加载，修改 Caddyfile 可校验后平滑 reload，不必重新构建业务镜像。
 
 ## 11. 日志、数据库入口与验证
 
-本地日志看各进程终端；未来容器运行后用 docker compose logs -f server agent。Studio 通过普通 Agent dev 查看同一个云数据库的 Trace。
+本地日志看各进程终端；ECS 登录后执行以下命令。server 的日志同时包含 Node Server 和 Agent 输出；web 为 Caddy/TLS 日志。Studio 可在本机使用普通 Agent dev 读取同一个云数据库的 Trace，不把管理端口公开。
+
+```sh
+cd /opt/agent3d
+docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml ps
+docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml logs --tail=100 -f server web
+```
 
 - [Supabase Table Editor](https://supabase.com/dashboard/project/gsgrdwtisfgcjybgkucg/editor)：schema 选 agent3d。
 - [Supabase Storage](https://supabase.com/dashboard/project/gsgrdwtisfgcjybgkucg/storage/buckets)：选私有 agent3d bucket。
 - 旧线上日志仍在 Cloudflare 的 agent3d、agent3d-model；不能据本机日志认定旧站点已切换。
 
-本次实际验证结果：
+迁移阶段已经完成的本地验证（与页首 ECS 线上验收分开记录）：
 
 - Node Server 和独立 Mastra 的生产构建已实际启动，Agent API 与云端 Trace light 均为 HTTP 200。
 - Node Server、Agent、Web 与 Electron 均构建通过；Electron 是构建产物，不是 Windows 安装包，也未宣称完成 Electron 窗口的专项验收。
@@ -230,9 +236,9 @@ HTTPS / Caddy + Web
 
 Node 打包也做了实际启动校验：共享 workspace TypeScript 必须编译进 Server，不能将所有包都 external 后直接交给普通 Node。修复后的 dist/index.js 已直接运行。
 
-真实模型端到端链路仍与这些确定性验证分开。早前 Agnes 有 429/1015，用户选择保留服务商；本轮验证不主动调用模型消耗额度。
+早前 Workers 上的 Agnes 调用曾遇到 429/1015，用户选择保留服务商。最新 ECS 验收已实际调用 Agnes，成功完成提问、生成和继续修改；不能将本次成功理解为服务商今后不会限流。
 
-仍需后续处理的边界：客户端无限循环不具有进程级资源隔离；错误目前需用户反馈给 Agent；Server 重启后旧人工回调不能永久恢复；复杂源码的历史上下文长度仍有限；没有自动备份和 Trace/孤立文件清理任务。新线上部署、Docker 运行和付费方案均未执行。
+仍需后续处理的边界：客户端无限循环不具有进程级资源隔离；错误目前需用户反馈给 Agent；Server 重启后旧人工回调不能永久恢复；复杂源码的历史上下文长度仍有限；没有自动备份和 Trace/孤立文件清理任务。ECS 已上线，Cloudflare 付费容器方案未执行。
 
 可观测性补充：普通 `/api/agents` 在完全没有请求配置时会尝试推断动态模型，当前严格模型校验仍会产生 LLM 配置警告；工具列表本身已能返回全部 5 个工具。真实聊天由入口提供配置，未为了消除这个发现阶段的警告而给业务请求偷偷使用环境密钥。PostgreSQL 适配器也会提示不支持批量 logs，Trace light 的 HTTP 200 与这些非致命日志分别记录。
 

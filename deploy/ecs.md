@@ -1,5 +1,11 @@
 # 阿里云 ECS 发布
 
+## 当前功能版本（c3b7f29）
+
+当前运行包含“我的资产”、右上角默认头像菜单及浅色配色的版本，[CI 构建与实际启动检查](https://github.com/yueqjGithub/gen3D/actions/runs/44309772343) 通过。入口：头像 → 我的资产，可搜索、预览和下载已批准模型；修改密码和设置也在同一菜单中。
+
+资产仍依赖原会话。删除会话前会明确提示同步删除资产，确认后清理 Storage 中的 GLB 和数据库记录；取消时保留原数据。不新建收藏表、不复制模型文件、不需要数据库迁移。线上真实浏览器和独立 Supabase 测试副本已验证该行为，用户已有资产未清空。更新前镜像保存在 before-assets 标签下。
+
 ## 域名证书与接入结果（2026-11-18）
 
 用户新购域名 mymaster3d.online，已实名认证，尚未完成 ICP 备案。最初公共 DNS 返回 NXDOMAIN，随后 NS 委派与 @ / www 的 A 记录均已生效，两个域名都指向 47.109.49.110。权威 DNS 为 dns15.hichina.com、dns16.hichina.com。
@@ -66,4 +72,4 @@ docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml logs --tail=100
 
 模型 API Key 保存在浏览器 localStorage，按站点来源隔离。Cloudflare、IP、根域名和 www 页面不会自动共享本地 Key，首次切换入口需在新页面的模型设置中重新填写；应用账户、会话与资产仍来自同一个 Supabase。首次空闲检查：后端约 304 MiB、Web 约 33 MiB，Docker 开机启动已启用，两个服务均设置 unless-stopped 重启策略。
 
-初次镜像由 [GitHub Actions](https://github.com/yueqjGithub/gen3D/actions/runs/44241672091) 从 be12437 构建，当前运行的是 e1d583e 的域名支持版。更新前保留了 agent3d-backend:before-domain、agent3d-web:before-domain 镜像标签和权限为 600 的 deploy/.env.before-domain，便于回退来源配置。部署入口配置位于 codex/deploy-node 最新提交，Caddyfile 通过只读挂载更新；纯网关配置修改无需重新打包业务镜像。旧 Cloudflare 站点未删除，当前推荐使用 ECS 新入口。未构建 Windows 安装包。
+初次镜像由 [GitHub Actions](https://github.com/yueqjGithub/gen3D/actions/runs/44241672091) 从 be12437 构建，e1d583e 完成域名支持，最新运行版本为本页开头的 c3b7f29。域名更新前保留了 agent3d-backend:before-domain、agent3d-web:before-domain 镜像标签和权限为 600 的 deploy/.env.before-domain，便于回退来源配置。部署入口配置位于 codex/deploy-node 最新提交，Caddyfile 通过只读挂载更新；纯网关配置修改无需重新打包业务镜像。旧 Cloudflare 站点未删除，当前推荐使用 ECS 新入口。未构建 Windows 安装包。

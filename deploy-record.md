@@ -4,6 +4,8 @@
 
 ### 2026-11-18 已上线：阿里云 ECS
 
+“我的资产”功能更新（c3b7f29）已部署并通过公网验收，[镜像构建记录](https://github.com/yueqjGithub/gen3D/actions/runs/44309772343)。右上角默认头像菜单整合“我的资产”“设置”“修改密码”；配色调整为浅灰白底、灰蓝文字与少量陶土色按钮。资产列表只展示登录用户已批准的模型，可搜索、交互预览和下载。按用户选择，资产随原会话删除，操作前会明确提示同步删除已批准资产及模型文件。
+
 当前入口：[https://mymaster3d.online](https://mymaster3d.online)，同时保留 [www](https://www.mymaster3d.online) 与 [IP](https://47.109.49.110) 入口。普通 Node Server/Agent 已部署到阿里云 ECS（2 核 / 2 GiB）的 /opt/agent3d，Web 由 Caddy 提供，继续使用已有 Supabase。详细说明见 [ECS 部署记录](deploy/ecs.md)。按用户要求已移除 Caddy Basic Auth，直接进入应用登录页；只需原有应用账号，业务 API 仍要求登录。
 
 域名证书已由 Caddy 通过 TLS-ALPN 自动签发并接管续期，根域名与 www 的 Let's Encrypt 证书均已严格验证。Server 的来源配置增加逗号分隔的精确列表，同时接受上述三个 HTTPS 来源。已发布 e1d583e 镜像，[构建与启动验证](https://github.com/yueqjGithub/gen3D/actions/runs/44290249198) 通过；Server 56 项测试、类型与生产构建通过。真实浏览器已逐一验证三个入口的登录和 GLB 预览，根域名真实 Agnes SSE 聊天也已通过。域名尚未完成 ICP 备案；HTTP 曾返回阿里云备案拦截页，证书签发不等于备案完成，应继续办理。
@@ -243,5 +245,19 @@ Node 打包也做了实际启动校验：共享 workspace TypeScript 必须编�
 仍需后续处理的边界：客户端无限循环不具有进程级资源隔离；错误目前需用户反馈给 Agent；Server 重启后旧人工回调不能永久恢复；复杂源码的历史上下文长度仍有限；没有自动备份和 Trace/孤立文件清理任务。ECS 已上线，Cloudflare 付费容器方案未执行。
 
 可观测性补充：普通 `/api/agents` 在完全没有请求配置时会尝试推断动态模型，当前严格模型校验仍会产生 LLM 配置警告；工具列表本身已能返回全部 5 个工具。真实聊天由入口提供配置，未为了消除这个发现阶段的警告而给业务请求偷偷使用环境密钥。PostgreSQL 适配器也会提示不支持批量 logs，Trace light 的 HTTP 200 与这些非致命日志分别记录。
+
+## 12. 我的资产、账户菜单与删除行为
+
+这次没有新增资产表、收藏副本或模型文件。用户在原来的审阅面板批准模型后，artifacts.status 变为 approved；“我的资产”读取同一条资产记录，因此已有的已批准资产会直接出现。
+
+数据路线：右上角头像 → 我的资产 → api.listApprovedAssets → GET /api/artifacts → 验证登录 Cookie → artifacts.listApproved。PostgreSQL 查询联结 agent3d.artifacts 和原生 mastra_threads，使用当前用户的 resourceId 与 approved 状态筛选；客户端不能通过传 owner 参数读取其他用户的资产。原有 /api/artifacts/:id/model、download 仍逐项检查会话归属，下载仍要求 approved。
+
+MyAssets.tsx 自己保存列表、搜索与当前选中项，只为选中模型创建一个 iframe，读取已经保存在 Storage 的 GLB，不重新执行生成脚本。使用原生 dialog 管理弹窗焦点与 Escape；底下的 ChatView 保持挂载，打开资产页不会因切换整个页面而销毁聊天连接。AccountMenu.tsx 管理头像菜单的展开、外部点击关闭和键盘选择；App.tsx 只负责打开资产、设置和修改密码界面。
+
+删除会话前，侧栏的确认提示明确说明：消息、附件、已批准资产和模型文件会一起删除。用户取消时不发删除请求；确认后，Server 先清理附件，再在删除会话的流程中读取资产脚本的 modelId 并删除对应私有 GLB，随后删除原生消息与会话，由外键级联删除资产记录。文件和数据库属于不同服务，文件删除失败会返回错误，数据库事务不会继续删除这些资产记录。
+
+验证：Server 57 项、Desktop 14 项回归通过，工作区类型检查、Web 和 Electron 构建通过。真实 Chrome 验证了账户菜单、修改密码入口、资产搜索、单模型预览、GLB 下载、手机布局与 Escape 关闭；查看资产没有重新上传模型。使用独立测试会话和 GLB 副本，在实际 Supabase 验证 pending 不进入列表、批准后出现、取消删除保留、确认删除后记录与模型文件均移除，测试会话和副本已清理。没有为测试改变业务默认行为。
+
+上述交互和实际文件删除检查也已在 https://mymaster3d.online 发布后复核通过。ECS 保留 agent3d-backend:before-assets 和 agent3d-web:before-assets 镜像标签，更新不需要数据库迁移或清空原有资产。Windows 桌面端共用这套 React 界面，已完成 Electron 构建检查，未打包新的 Windows 安装程序。
 
 参考：[Cloudflare Containers](https://developers.cloudflare.com/containers/)、[Workers Node 兼容](https://developers.cloudflare.com/workers/runtime-apis/nodejs/)、[GLTFExporter](https://threejs.org/docs/pages/GLTFExporter.html)、[iframe sandbox](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/iframe)。

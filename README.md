@@ -52,6 +52,8 @@ Web 开发页为 http://localhost:5173，Server 为 http://127.0.0.1:62586，Age
 
 当前已部署到阿里云 ECS：[https://mymaster3d.online](https://mymaster3d.online)，使用 Caddy + 普通 Node Server/Agent + Supabase，同时保留 www 和 IP 入口。运行、日志、HTTPS 和应用登录说明见 [ECS 部署记录](deploy/ecs.md)，其他 Docker 启动方式见 [Web 部署](docs/web-deployment.md)。旧 Workers 站点保留，不作为当前推荐入口。
 
+右上角头像菜单提供“我的资产”“设置”和“修改密码”。批准过的模型可以在“我的资产”中搜索、预览和下载；资产仍属于原会话，删除会话前会提示同步删除资产和模型文件。实现与数据流说明见 [部署记录第 12 节](deploy-record.md#12-我的资产账户菜单与删除行为)。
+
 ```powershell
 pnpm --filter @agent3d/server build
 pnpm --filter @agent3d/agent build

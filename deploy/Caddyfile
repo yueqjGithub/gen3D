@@ -1,9 +1,5 @@
 {$SITE_ADDRESS} {
-	# 学习项目的外网入口。浏览器先通过这一层访问密码，再进入工程已有的登录页面。
-	# 应用本身也使用签名 Cookie 和云数据库密码哈希；这一层是额外的站点访问密码。
-	basic_auth {
-		{$DEPLOY_USER} {$DEPLOY_PASSWORD_HASH}
-	}
+	# 直接展示应用登录页；Server 使用签名 Cookie 和密码校验保护业务接口。
 
 	@api path /api /api/*
 	handle @api {

@@ -42,8 +42,6 @@ services:
     restart: unless-stopped
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:-:8080}
-      DEPLOY_USER: ${DEPLOY_USER:-owner}
-      DEPLOY_PASSWORD_HASH: ${DEPLOY_PASSWORD_HASH:?请设置访问密码的 bcrypt 哈希}
     ports:
       - "${HTTP_BIND:-127.0.0.1}:80:80"
       - "${HTTP_BIND:-127.0.0.1}:443:443"

@@ -2,7 +2,7 @@
 
 目标机器：47.109.49.110，Alibaba Cloud Linux 3，2 核 / 2 GiB，Docker 26.1.3、Compose 2.27.0。已通过 SSH 上传并导入镜像，在 /opt/agent3d 启动 Node 后端，健康检查通过。后端镜像在 ECS 解包后约 1.29 GB，Web 镜像约 67 MB。
 
-当前状态：已上线，入口为 [https://47.109.49.110](https://47.109.49.110)。安全组已放行 80/443，两个容器持续运行。HTTP 自动跳转 HTTPS；未提供站点访问密码返回 401，这是预期的访问保护，不是启动失败。
+当前状态：已上线，入口为 [https://47.109.49.110](https://47.109.49.110)。安全组已放行 80/443，两个容器持续运行。HTTP 自动跳转 HTTPS，直接展示应用登录页；未登录访问业务 API 仍返回 401。
 
 已用真实 Chrome 验证登录、新建会话、Agnes SSE、选项提问、自定义回答恢复、手动工具确认、Three.js iframe 生成、Supabase 保存、批准、下载与刷新读取；继续要求修改花瓶颜色时，Agent 重新调用生成工具，产生新的深蓝色模型和 GLB。首次下载 515272 字节，修改后 515276 字节，均校验 GLB 2.0 头和长度。刷新未再次执行上传。测试使用独立账号，不修改用户已有会话。
 
@@ -36,7 +36,7 @@ docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml ps
 docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml logs --tail=100 -f server web
 ```
 
-## HTTPS 与入口凭据
+## HTTPS 与应用登录
 
 用户暂无域名，因此使用 https://47.109.49.110。deploy/Caddyfile.ecs 显式设置 Let's Encrypt ACME shortlived profile，申请公网 IP 证书，Caddy 持久卷保存证书并自动续期。无需改成自签证书或去掉登录 Cookie 的 Secure 属性。参考 [Let's Encrypt IP 证书说明](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)。
 
@@ -46,7 +46,9 @@ docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml logs --tail=100
 
 安全组入方向已允许 TCP 80 和 TCP 443，来源 0.0.0.0/0；保留原 SSH 规则，不开放全部端口。最初因安全组未放行，证书挑战超时，曾暂停 Web 防止重复失败申请；该问题已解决，Web 已恢复。
 
-本次没有覆盖既有服务或删除数据库。普通业务不使用 root SSH 密码：站点入口另有随机生成的 owner 访问密码，保存在本机忽略提交的 .verification/ecs-access.txt；通过入口后继续使用应用原有账户。不要把这个文件或服务器环境文件提交到 Git。
+按用户要求已移除 Caddy 的 Basic Auth 入口验证，不再需要 owner 账号或额外的站点密码，只需使用应用原有账户登录。Server 的签名 Cookie、密码校验和资源归属检查继续生效。服务器运行配置不再需要 DEPLOY_USER、DEPLOY_PASSWORD_HASH；此前本机 ecs-access.txt 中的入口密码已失效。
+
+移除后已用未设置任何 HTTP 认证凭据的新浏览器会话验证：首页直接返回 200 并展示登录表单，未登录的会话 API 仍返回 401，应用账户登录后会话 API 返回 200，已有 GLB 预览正常。
 
 模型 API Key 保存在浏览器 localStorage，按站点来源隔离。原 Cloudflare 地址中的 Key 不会自动出现在新 IP 地址的页面，首次使用需在新页面的模型设置中重新填写；应用账户、会话与资产仍来自同一个 Supabase。最终空闲检查：后端约 304 MiB、Web 约 33 MiB，Docker 开机启动已启用，两个服务均设置 unless-stopped 重启策略。
 

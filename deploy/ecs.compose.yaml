@@ -25,8 +25,6 @@ services:
     restart: unless-stopped
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?请设置公网 IP 或域名}
-      DEPLOY_USER: ${DEPLOY_USER:-owner}
-      DEPLOY_PASSWORD_HASH: ${DEPLOY_PASSWORD_HASH:?请设置站点访问密码哈希}
     ports:
       - "80:80"
       - "443:443"

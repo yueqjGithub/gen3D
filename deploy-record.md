@@ -4,7 +4,7 @@
 
 ### 2026-11-18 已上线：阿里云 ECS
 
-当前入口：[https://47.109.49.110](https://47.109.49.110)。普通 Node Server/Agent 已部署到阿里云 ECS（2 核 / 2 GiB）的 /opt/agent3d，Web 由 Caddy 提供，继续使用已有 Supabase。详细说明见 [ECS 部署记录](deploy/ecs.md)。站点第一层访问凭据保存在本机忽略提交的 .verification/ecs-access.txt，通过后仍使用应用自己的账户。
+当前入口：[https://47.109.49.110](https://47.109.49.110)。普通 Node Server/Agent 已部署到阿里云 ECS（2 核 / 2 GiB）的 /opt/agent3d，Web 由 Caddy 提供，继续使用已有 Supabase。详细说明见 [ECS 部署记录](deploy/ecs.md)。按用户要求已移除 Caddy Basic Auth，直接进入应用登录页；只需原有应用账号，业务 API 仍要求登录。
 
 实际运行两个容器：web（Caddy 与静态页面）和 server（独立的 Server、Agent 两个 Node 进程）。公网只开放网站 80/443，Agent 管理端口不公开。安全组已由用户放行，IP 证书已由 Let's Encrypt YE2 签发；Caddy 配置了自动续期，并通过 default_sni 处理浏览器裸 IP 访问。没有关闭 TLS 验证。
 

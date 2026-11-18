@@ -16,7 +16,7 @@ pnpm --filter @agent3d/desktop dev:web
 
 ## Docker
 
-准备根 .env.supabase 与 .env.server（当前机器已配置，不要覆盖）。从 deploy/.env.example 准备 deploy/.env，设置 SITE_ADDRESS、PUBLIC_ORIGIN 和站点访问密码哈希。生产使用 HTTPS。
+准备根 .env.supabase 与 .env.server（当前机器已配置，不要覆盖）。从 deploy/.env.example 准备 deploy/.env，设置 SITE_ADDRESS、PUBLIC_ORIGIN。生产使用 HTTPS。Caddy 不设置额外入口密码，直接进入应用登录页；业务 API 由 Server 鉴权。
 
 ```powershell
 docker compose --env-file deploy/.env config --quiet

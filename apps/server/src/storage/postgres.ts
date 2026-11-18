@@ -217,6 +217,14 @@ export function createPostgresRepositories(
           [id, owner],
         );
         if (!row) return false;
+        // 先读取并删除本会话的 GLB，再级联删除数据库记录，否则会丢失文件的 modelId。
+        // 已批准资产也随会话删除，与“我的资产”的界面提示保持一致。
+        const assets = await tx.any('SELECT script FROM agent3d.artifacts WHERE conversation_id=$1', [id]);
+        const keys = assets.flatMap(asset => {
+          const model = readThreeModel(asset.script);
+          return model ? ['models/' + model.modelId + '.glb'] : [];
+        });
+        await deleteObjects(keys);
         await tx.none('DELETE FROM agent3d.mastra_messages WHERE thread_id=$1', [id]);
         await tx.none('DELETE FROM agent3d.mastra_threads WHERE id=$1', [id]);
         return true;
@@ -299,6 +307,17 @@ export function createPostgresRepositories(
     toArtifact(await db.oneOrNone('SELECT * FROM agent3d.artifacts WHERE id=$1', [id]));
   const artifacts: CreateAppDependencies['artifacts'] = {
     get: getArtifact,
+    async listApproved(username) {
+      // 用户名来自已验证的登录 Cookie，不接收客户端传入的 owner。
+      // 通过原生会话表判断归属，pending/rejected 和其他用户的资产均不进入列表。
+      const rows = await db.any(`
+        SELECT a.* FROM agent3d.artifacts a
+        JOIN agent3d.mastra_threads t ON t.id=a.conversation_id
+        WHERE t."resourceId"=$1 AND a.status='approved'
+        ORDER BY a.created_at DESC,a.id DESC
+      `, [username]);
+      return rows.map(row => toArtifact(row)!);
+    },
     async createPending(input) {
       const artifact = assetArtifactSchema.parse({
         ...input,

@@ -88,6 +88,15 @@ export function createArtifactRepository(database: SqliteDatabase) {
     },
 
     get,
+    /** 资产仍归属于原会话；只列出当前用户已批准的资产，不建立另一份收藏副本。 */
+    listApproved(username: string): AssetArtifact[] {
+      const rows = database.prepare(`
+        SELECT a.id FROM artifacts a JOIN mastra_threads t ON t.id = a.conversation_id
+        WHERE t."resourceId" = ? AND a.status = 'approved'
+        ORDER BY a.created_at DESC, a.id DESC
+      `).all(username) as Array<{ id: string }>;
+      return rows.map(row => get(row.id)!);
+    },
     // 路径只使用经过 UUID 校验的 modelId；不接受请求传入任意文件路径。
     async readModel(id: string): Promise<Uint8Array | null> {
       const artifact = get(id);

@@ -67,6 +67,32 @@ afterEach(async () => {
 }, 60000);
 
 describe('Hono API', () => {
+  it('lists only the signed-in users approved assets and removes them with their conversation', async () => {
+    const { app, artifacts, database } = await createFixture();
+    const conversations = createConversationRepository(database.connection);
+    createLoginRepository(database.connection).create('asset-other-user', 'test');
+    const mine = conversations.create('我的作品', 'agent3d-local');
+    const other = conversations.create('他人的作品', 'asset-other-user');
+    const approved = artifacts.createPending({ conversationId: mine.id, brief: '已批准', script: 'import bpy\n' });
+    artifacts.setStatus(approved.id, 1, 'approved');
+    artifacts.createPending({ conversationId: mine.id, brief: '待审阅', script: 'import bpy\n' });
+    const rejected = artifacts.createPending({ conversationId: mine.id, brief: '已拒绝', script: 'import bpy\n' });
+    artifacts.setStatus(rejected.id, 1, 'rejected');
+    const privateAsset = artifacts.createPending({ conversationId: other.id, brief: '他人的资产', script: 'import bpy\n' });
+    artifacts.setStatus(privateAsset.id, 1, 'approved');
+
+    expect((await rendererRequest(app, '/api/artifacts', { headers: { Cookie: '' } })).status).toBe(401);
+    // 即便客户端伪造 owner 查询参数，也只能看到自己登录身份的已批准资产。
+    const response = await rendererRequest(app, '/api/artifacts?owner=asset-other-user');
+    expect(response.status).toBe(200);
+    expect((await response.json()).artifacts.map((asset: { id: string }) => asset.id)).toEqual([approved.id]);
+    expect((await rendererRequest(app, `/api/artifacts/${privateAsset.id}/download`)).status).toBe(404);
+    expect((await rendererRequest(app, `/api/artifacts/${approved.id}/download`)).status).toBe(200);
+    expect((await rendererRequest(app, `/api/conversations/${mine.id}`, { method: 'DELETE' })).status).toBe(204);
+    expect((await (await rendererRequest(app, '/api/artifacts')).json()).artifacts).toEqual([]);
+    expect(artifacts.get(privateAsset.id)?.status).toBe('approved');
+  });
+
   it('validates client-exported GLB ownership, version and binary header before private upload', async () => {
     const { app, artifacts, database } = await createFixture();
     const conversations = createConversationRepository(database.connection);

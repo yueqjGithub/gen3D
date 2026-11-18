@@ -223,6 +223,10 @@ export const api = {
     return uploadMetadataSchema.parse((response as { attachment: unknown }).attachment);
   },
   getArtifact,
+  async listApprovedAssets() {
+    const result = await request('/artifacts') as { artifacts: unknown };
+    return assetArtifactSchema.array().parse(result.artifacts);
+  },
   async saveModel(id: string, expectedVersion: number, bytes: ArrayBuffer) {
     await request(`/artifacts/${encodeURIComponent(id)}/model?expectedVersion=${expectedVersion}`, {
       method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes,

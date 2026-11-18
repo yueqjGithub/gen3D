@@ -35,6 +35,8 @@ export function ConversationSidebar({
   }
 
   async function deleteConversation(id: string) {
+    const title = conversations.find(conversation => conversation.id === id)?.title ?? '此会话';
+    if (!window.confirm(`确定删除“${title}”吗？\n会话内容、附件，以及已批准的资产和模型文件都会一起删除，且无法恢复。`)) return;
     try {
       await onDelete(id);
       setError(null);

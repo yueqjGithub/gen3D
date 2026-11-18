@@ -10,12 +10,15 @@ import { ModelProvider } from './features/settings/ModelContext';
 import { PreferenceSettings } from './features/settings/PreferenceSettings';
 import { LoginForm } from './features/login/LoginForm';
 import { LocalApiError } from './api/client';
+import { AccountMenu } from './features/login/AccountMenu';
+import { MyAssets } from './features/assets/MyAssets';
 
 /** 工作台的顶层状态：当前会话、历史消息、当前资产和设置面板。 */
 export default function App() {
   const [username, setUsername] = useState<string | null>(null);
   const [checkingLogin, setCheckingLogin] = useState(true);
   const [changingPassword, setChangingPassword] = useState(false);
+  const [assetsOpen, setAssetsOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatUIMessage[]>([]);
@@ -168,19 +171,13 @@ export default function App() {
       <section className="workspace">
         <div className="workspace__toolbar">
           <span>从灵感到可审阅的 3D 资产</span>
-          <button type="button" className="account-button" onClick={() => setChangingPassword(true)}>
-            <span className="account-button__username">{username}</span>
-            <span aria-hidden="true">·</span>
-            <span>修改密码</span>
-          </button>
-          <button type="button" className="settings-button" onClick={() => setSettingsOpen(true)}>
-            设置
-          </button>
+          <AccountMenu username={username} onAssets={() => setAssetsOpen(true)}
+            onPassword={() => setChangingPassword(true)} onSettings={() => setSettingsOpen(true)} />
         </div>
 
         {error && <p className="workspace__error" role="alert">{error}</p>}
         {loadingConversations ? (
-          <p className="workspace__loading" role="status">正在读取本机会话…</p>
+          <p className="workspace__loading" role="status">正在读取会话…</p>
         ) : activeConversation ? (
           <div className="workspace__content">
             <div className="workspace__chat">
@@ -213,11 +210,12 @@ export default function App() {
             <button type="button" className="primary-button" onClick={() => void createConversation()}>
               开始新的创作 <span aria-hidden="true">↗</span>
             </button>
-            <small>你的会话与偏好将保存在这台设备上。</small>
+            <small>会话与资产自动保存，随时继续创作。</small>
           </section>
         )}
       </section>
 
+      {assetsOpen && <MyAssets onClose={() => setAssetsOpen(false)} />}
       {settingsOpen && (
         <div
           className="settings-overlay"

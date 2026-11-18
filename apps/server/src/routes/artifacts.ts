@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { createArtifactRepository } from '../storage/artifacts';
 import { HttpError } from '../http-errors';
 import { bodyLimit } from 'hono/body-limit';
+import { getCookie } from 'hono/cookie';
 
 type ArtifactRepository = Repository<ReturnType<typeof createArtifactRepository>>;
 
@@ -26,6 +27,12 @@ const editArtifactSchema = z.object({
  */
 export function createArtifactRoutes(artifacts: ArtifactRepository) {
   const routes = new Hono();
+
+  // app.ts 已验证登录签名。这里只使用服务端确认的用户身份查询列表；
+  // 单个资产的预览和下载仍走原接口，并继续检查原会话的归属。
+  routes.get('/artifacts', async context => context.json({
+    artifacts: await artifacts.listApproved(getCookie(context, 'username')!),
+  }));
 
   // GLB 由 Web/Desktop 的隔离 iframe 导出。凭据留在 Server，客户端只能上传
   // 自己会话中的待审阅资产；modelId 从已保存源码中读取，不能指定任意 Storage 路径。

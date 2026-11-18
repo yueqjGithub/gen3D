@@ -1,0 +1,26 @@
+# 无自有域名的 ECS：显式使用支持公网 IP 的 ACME shortlived 证书。
+# /data 持久卷保存账户和证书，Caddy 自动续期；不要把它当成六天后手动重发。
+{$SITE_ADDRESS} {
+	tls {
+		issuer acme https://acme-v02.api.letsencrypt.org/directory {
+			profile shortlived
+		}
+	}
+	basic_auth {
+		{$DEPLOY_USER} {$DEPLOY_PASSWORD_HASH}
+	}
+	@api path /api /api/*
+	handle @api {
+		request_body {
+			max_size 21MB
+		}
+		reverse_proxy server:62586 {
+			flush_interval -1
+		}
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

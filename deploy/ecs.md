@@ -1,6 +1,8 @@
 # 阿里云 ECS 发布
 
-目标机器：47.109.49.110，Alibaba Cloud Linux 3，2 核 / 2 GiB，截图显示已安装 Docker。尚未取得 SSH 登录方式，不能把端口连通当作已经登录或发布成功。
+目标机器：47.109.49.110，Alibaba Cloud Linux 3，2 核 / 2 GiB，Docker 26.1.3、Compose 2.27.0。已通过 SSH 上传并导入镜像，在 /opt/agent3d 启动 Node 后端，健康检查通过。后端镜像在 ECS 解包后约 1.29 GB，Web 镜像约 67 MB。
+
+当前状态：Server、独立 Mastra Agent、Supabase 严格 TLS 数据库连接、原生会话/消息表与私有存储桶检查均已通过。外部 TCP 80/443 超时，ACME 证书挑战也报告连接超时；主机 firewalld 未启用，需控制台放行安全组。等待期间已暂停 Web，防止重复失败证书申请；后端保持运行。尚未完成可信 HTTPS 和浏览器端全流程验收。
 
 ## 运行方式
 
@@ -19,7 +21,7 @@ Web/Desktop 的 iframe 继续执行 Three.js 并导出 GLB，经 Server 保存�
 
 GitHub Actions 在 codex/deploy-node 分支构建并验证 backend 镜像，再构建 web 镜像，产出 agent3d-ecs-images。产物包含两个镜像的 tar.gz 与 SHA256 校验文件，保留 3 天；不含生产密钥。由部署机器下载并用 SSH 上传，避免 2 GiB ECS 现场编译。
 
-服务器专用目录需包含镜像归档、deploy/ecs.compose.yaml、deploy/.env、根目录 .env.supabase 与 .env.server。服务器配置只复制必需变量，不复制本机 Windows CA 路径、代理或开发地址。配置文件限制为部署用户可读，不提交 Git。
+服务器专用目录包含镜像归档、deploy/ecs.compose.yaml、deploy/Caddyfile.ecs、deploy/.env、根目录 .env.supabase 与 .env.server。服务器配置只复制必需变量，不复制本机 Windows CA 路径、代理或开发地址。配置文件权限为 600，部署目录权限为 700，不提交 Git。
 
 ```sh
 sha256sum -c agent3d-images.sha256
@@ -32,8 +34,10 @@ docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml logs --tail=100
 
 ## 发布前仍需取得的信息
 
-- SSH 用户名、登录方式；使用私钥时只提供本机文件路径，不把私钥写进聊天或 Git。
-- 公开 HTTPS 入口域名及 DNS 配置。应用登录 Cookie 使用 Secure，不能用裸 HTTP 验收登录功能。
-- 登录服务器后核对现有服务、端口、磁盘、Docker/Compose 版本以及 Supabase 连通性；不覆盖已有站点或数据库。
+用户暂无域名，因此使用 https://47.109.49.110。deploy/Caddyfile.ecs 显式设置 Let's Encrypt ACME shortlived profile，申请公网 IP 证书，Caddy 持久卷保存证书并自动续期。无需改成自签证书或去掉登录 Cookie 的 Secure 属性。参考 [Let's Encrypt IP 证书说明](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)。
+
+安全组入方向需允许 TCP 80 和 TCP 443，来源 0.0.0.0/0；保留原 SSH 规则，不开放全部端口。控制台修改完成后在服务器 /opt/agent3d 执行上面的 up -d 命令即可恢复 Web 和证书申请，再验证浏览器信任链。
+
+本次没有覆盖既有服务或删除数据库。普通业务不使用 root SSH 密码：站点入口另有随机生成的 owner 访问密码，保存在本机忽略提交的 .verification/ecs-access.txt；通过入口后继续使用应用原有账户。不要把这个文件或服务器环境文件提交到 Git。
 
 上线后检查登录、历史会话、SSE、手动工具确认、选项回答、iframe 预览/导出及刷新后重新读取 GLB，再记录最终域名和版本。旧 Cloudflare 站点在新站点验证完成前保留。

@@ -27,7 +27,7 @@ docker compose --env-file deploy/.env logs -f server agent
 
 Compose 将 CA 路径覆盖为 /app/deploy/supabase-ca.crt，不把 Windows 路径复制到 Linux。Server/Agent 只在 Docker 私网开放端口，外部仅访问 Caddy Web。没有业务数据卷和 Chromium 依赖。
 
-当前只有单 Server 进程处理人工回答回调，不直接扩为多副本。本机未安装 Docker，上述镜像与编排尚未实际构建运行，不能作为已通过的验收记录。
+当前只有单 Server 进程处理人工回答回调，不直接扩为多副本。本机没有 Docker；后端镜像已在 GitHub Actions 构建并实际启动验证。阿里云 ECS 采用预构建镜像的双容器编排，具体部署与当前外网访问前提见 [ECS 部署记录](../deploy/ecs.md)，不要把 CI 通过等同于线上流程验收。
 
 ## Cloudflare
 

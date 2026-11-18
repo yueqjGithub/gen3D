@@ -6,6 +6,8 @@
 
 后续用户已改选阿里云 ECS（47.109.49.110，2 核 / 2 GiB）。部署目标改为 Docker + Caddy + 普通 Node，继续使用现有 Supabase，不再以开通 Cloudflare Paid 为前提。SSH 端口已确认可达，尚待登录方式及 HTTPS 域名。ECS 配置及步骤见 [ECS 部署说明](deploy/ecs.md)，以下 Containers 检查结果保留为此前方案记录。
 
+ECS 后续进展：已取得 SSH 登录方式并实际部署到 /opt/agent3d。镜像校验、导入、Caddy 2.11.9 配置校验、Node 健康检查、独立 Agent API、Supabase 严格 TLS 和私有 bucket 检查均通过。没有域名，采用公网 IP 的 Let's Encrypt shortlived 证书，自动续期。当前安全组尚未放行 TCP 80/443，外网和 ACME 挑战均超时，暂时停止 Web 的失败重试，后端继续运行。待用户放行后恢复 Web，再验证可信 HTTPS 及真实浏览器流程；不能把内部检查通过写成外网已可使用。
+
 当前线上仍为原 agent3d Worker，新 Node 版本尚未切换。新增 deploy/cloudflare 的薄入口，将普通 Node Server/Agent 放在同一个 Cloudflare Container，Web 由静态资源绑定提供，Supabase 继续使用已有项目。它不是新增的业务 workspace package。详细配置见 [容器部署说明](deploy/cloudflare/README.md)。
 
 Cloudflare 账号目前为 Free，Containers API 明确要求 Workers Paid；尚未开通订阅或产生容器费用。本机没有 Docker，因此通过 GitHub Actions 验证 Linux 镜像构建与两个进程启动。工作流只使用虚拟配置，不包含生产密钥。新站点名称为 agent3d-node，验证通过前保留旧站点。

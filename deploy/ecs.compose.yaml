@@ -1,0 +1,44 @@
+# 已构建镜像通过 docker load 导入；ECS 不需要安装 Node/pnpm 或现场编译。
+# 在项目根目录执行：docker compose --env-file deploy/.env -f deploy/ecs.compose.yaml up -d
+name: agent3d
+services:
+  server:
+    image: agent3d-backend:deploy
+    restart: unless-stopped
+    env_file:
+      - ../.env.supabase
+      - ../.env.server
+    environment:
+      AGENT3D_WEB_ORIGIN: ${PUBLIC_ORIGIN:?请设置 Web 的完整 HTTPS 地址}
+    # 这个镜像已包含 tini，内部仍是 Server 和 Agent 两个独立 Node 进程。
+    # 不发布 62586/62687，只允许 Web 容器经 Docker 网络访问 Server。
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:62586/api/login',{headers:{Origin:'http://localhost:5173'}}).then(r=>process.exit(r.status===401?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+  web:
+    image: agent3d-web:deploy
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?请设置域名}
+      DEPLOY_USER: ${DEPLOY_USER:-owner}
+      DEPLOY_PASSWORD_HASH: ${DEPLOY_PASSWORD_HASH:?请设置站点访问密码哈希}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      server:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  caddy-data:
+  caddy-config:

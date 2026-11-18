@@ -74,6 +74,30 @@ jobs:
           docker stop agent3d-check
           docker stop agent3d-db
           echo 'Node Server and independent Mastra Agent started successfully.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Build Web image for ECS
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: web
+          platforms: linux/amd64
+          load: true
+          tags: agent3d-web:deploy
+          cache-from: type=gha
+      - name: Export ready-to-run ECS images
+        shell: bash
+        run: |
+          docker tag agent3d-backend:check agent3d-backend:deploy
+          docker save agent3d-backend:deploy agent3d-web:deploy | gzip -1 > "$RUNNER_TEMP/agent3d-images.tar.gz"
+          cd "$RUNNER_TEMP"
+          sha256sum agent3d-images.tar.gz > agent3d-images.sha256
+      - uses: actions/upload-artifact@v6
+        with:
+          name: agent3d-ecs-images
+          path: |
+            ${{ runner.temp }}/agent3d-images.tar.gz
+            ${{ runner.temp }}/agent3d-images.sha256
+          retention-days: 3
+          compression-level: 0
       - name: Container logs on failure
         if: failure()
         run: |

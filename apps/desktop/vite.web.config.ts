@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Agent } from 'node:http';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
@@ -15,7 +16,13 @@ export default defineConfig({
   resolve: { alias: { '@renderer': resolve(appRoot, 'src/renderer/src') } },
   server: {
     host: 'localhost', port: 5173, strictPort: true,
-    proxy: { '/api': { target: 'http://127.0.0.1:62586', changeOrigin: false } },
+    // 同域 GET 通常不带 Origin；本地开发代理明确标识自己，供 Server 来源校验。
+    proxy: { '/api': {
+      target: 'http://127.0.0.1:62586', changeOrigin: false,
+      headers: { Origin: 'http://localhost:5173' },
+      // 保持代理到 Node 的上游连接；本机实测不保活时大 GLB 最后一段会被截断。
+      agent: new Agent({ keepAlive: true }),
+    } },
   },
   build: { outDir: resolve(appRoot, 'out/web'), emptyOutDir: true },
 });

@@ -69,6 +69,9 @@ export const agentChatRequestContextSchema = z.object({
  * Validates the selected model and the prepared conversation data sent only from Hono to Agent.
  */
 export const agentServiceRequestSchema = z.object({
+  // 服务端确认归属后的会话/用户标识，交给 Mastra 原生 memory 参数关联 Trace。
+  conversationId: z.uuid().optional(),
+  resourceId: z.string().min(1).max(80).optional(),
   toolApproval: z.enum(['manual', 'auto']).default('manual'),
   model: serviceModelSchema,
   apiKey: z.string().trim().min(1).max(4096),

@@ -16,6 +16,62 @@ interface MessageRow {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  clientTurnId?: string | null;
+}
+
+/**
+ * 两种写入者共用 Mastra 原生消息表：应用保存 UI 流，Mastra 保存原生 parts。
+ * 不能把原生 tool-invocation 当成本项目的 ui-chunk 直接校验，否则一旦有工具调用，
+ * 刷新、读取历史和重试都会失败。这里只在“读取历史”的边界转换，不改数据库原文。
+ */
+export function readStoredMessage(row: MessageRow): ChatMessage {
+  const content = typeof row.content === 'string' ? JSON.parse(row.content) : row.content;
+  const saved = content.metadata?.agent3d;
+  const parts: ChatMessage['parts'] = [];
+  if (!saved) for (const part of content.parts) {
+    if (part.type === 'text' || part.type === 'reasoning') {
+      parts.push({ type: part.type, text: part.text });
+    } else if (part.type === 'step-start') {
+      parts.push({ type: 'ui-chunk', chunk: { type: 'start-step' } });
+    } else if (part.type === 'tool-invocation') {
+      const tool = part.toolInvocation;
+      parts.push({ type: 'ui-chunk', chunk: {
+        type: 'tool-input-available', toolCallId: tool.toolCallId,
+        toolName: tool.toolName, input: tool.args ?? {},
+      } });
+      if (tool.state === 'result' && !tool.isError) {
+        parts.push({ type: 'ui-chunk', chunk: {
+          type: 'tool-output-available', toolCallId: tool.toolCallId, output: tool.result,
+        } });
+      } else if (tool.state === 'output-error' || tool.isError) {
+        parts.push({ type: 'ui-chunk', chunk: {
+          type: 'tool-output-error', toolCallId: tool.toolCallId,
+          errorText: '此工具调用未完成。',
+        } });
+      } else {
+        // 旧请求的审批回调已不在当前连接中，不重建一个无法提交的审批按钮。
+        parts.push({ type: 'ui-chunk', chunk: {
+          type: 'tool-output-error', toolCallId: tool.toolCallId,
+          errorText: '上次工具调用已中断，请重试本轮请求。',
+        } });
+      }
+    } else if (part.type === 'file') {
+      parts.push({ type: 'ui-chunk', chunk: {
+        type: 'file', url: part.data ?? part.url, mediaType: part.mimeType ?? part.mediaType,
+      } });
+    } else if (part.type === 'error') {
+      parts.push({ type: 'text', text: '上次生成未完成，请重试。' });
+    } else {
+      // 仍然校验未知片段，避免悄悄吞掉将来新增的内容。
+      parts.push(...chatMessageSchema.shape.parts.parse([part]));
+    }
+  }
+  return chatMessageSchema.parse({
+    id: row.id, conversationId: row.thread_id, role: row.role,
+    parts: saved?.parts ?? parts, createdAt: row.createdAt,
+    status: saved?.status ?? 'complete',
+    ...(row.clientTurnId ? { clientTurnId: row.clientTurnId } : {}),
+  });
 }
 
 interface TurnRow {
@@ -50,31 +106,7 @@ export interface ChatTurnResult {
  * 供模型读取的文本放在 Mastra 标准 content.parts；界面专用片段和状态放在 metadata。
  */
 export function createConversationRepository(database: SqliteDatabase) {
-  const toMessage = (row: MessageRow): ChatMessage => {
-    const content = z.object({
-      parts: z.array(z.unknown()),
-      metadata: z.object({
-        agent3d: z.object({
-          parts: chatMessageSchema.shape.parts,
-          status: chatMessageSchema.shape.status,
-        }).optional(),
-      }).optional(),
-    }).parse(JSON.parse(row.content));
-    // Mastra 原生写入的消息没有 agent3d metadata；文本和推理可直接映射到界面格式。
-    // 其他片段无法无损映射时明确报错，避免把用户数据静默丢弃。
-    const nativeParts = z.array(z.object({
-      type: z.enum(['text', 'reasoning']),
-      text: z.string(),
-    }));
-    return chatMessageSchema.parse({
-      id: row.id,
-      conversationId: row.thread_id,
-      role: row.role,
-      parts: content.metadata?.agent3d?.parts ?? nativeParts.parse(content.parts),
-      createdAt: row.createdAt,
-      status: content.metadata?.agent3d?.status ?? 'complete',
-    });
-  };
+  const toMessage = readStoredMessage;
 
   const saveMessage = (message: ChatMessage) => {
     const valid = chatMessageSchema.parse(message);
@@ -223,7 +255,9 @@ export function createConversationRepository(database: SqliteDatabase) {
     },
     listMessages(conversationId: string): ChatMessage[] {
       const rows = database.prepare(`
-        SELECT * FROM mastra_messages WHERE thread_id = ? ORDER BY "createdAt" ASC, id ASC
+        SELECT m.*, t.client_turn_id AS clientTurnId FROM mastra_messages m
+        LEFT JOIN chat_turns t ON t.user_message_id = m.id OR t.assistant_message_id = m.id
+        WHERE m.thread_id = ? ORDER BY m."createdAt" ASC, m.id ASC
       `).all(conversationId) as MessageRow[];
       return rows.map(toMessage);
     },

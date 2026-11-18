@@ -5,11 +5,10 @@ services:
       target: agent
     init: true
     restart: unless-stopped
-    shm_size: 256mb
-    security_opt:
-      - seccomp=./deploy/chromium-seccomp.json
-    volumes:
-      - app-data:/data
+    env_file:
+      - .env.supabase
+    environment:
+      SUPABASE_CA_PATH: /app/deploy/supabase-ca.crt
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:62687/api/agents').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -24,8 +23,10 @@ services:
     restart: unless-stopped
     environment:
       AGENT3D_WEB_ORIGIN: ${PUBLIC_ORIGIN:?请设置 Web 的完整公开地址}
-    volumes:
-      - app-data:/data
+      SUPABASE_CA_PATH: /app/deploy/supabase-ca.crt
+    env_file:
+      - .env.supabase
+      - .env.server
     depends_on:
       agent:
         condition: service_healthy
@@ -54,9 +55,8 @@ services:
       server:
         condition: service_healthy
 
-# Agent 和 Server 必须使用同一个本机卷，SQLite 的 WAL、上传附件、GLB 和运行快照一起持久化。
-# 当前审批/回答回调在 Server 内存里，因此这套部署保持一个 Server 实例。
+# 数据、附件、GLB、Trace 都保存到 Supabase，两个进程不共用业务数据卷。
+# 审批/回答回调保留在 Server 内存，因此学习项目先只运行一个 Server 实例。
 volumes:
-  app-data:
   caddy-data:
   caddy-config:

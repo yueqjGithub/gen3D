@@ -26,6 +26,7 @@ export type ChatDataParts = {
 // 历史消息的保存状态放在 metadata；实时流消息不一定包含该字段。
 export interface ChatMessageMetadata {
   persistedStatus?: 'complete' | 'error';
+  clientTurnId?: string;
 }
 
 export type ChatUIMessage = UIMessage<ChatMessageMetadata, ChatDataParts>;

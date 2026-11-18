@@ -60,12 +60,83 @@ function rendererRequest(
 
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   for (const fixture of fixtures.splice(0)) {
     await fixture.close();
   }
 }, 60000);
 
 describe('Hono API', () => {
+  it('validates client-exported GLB ownership, version and binary header before private upload', async () => {
+    const { app, artifacts, database } = await createFixture();
+    const conversations = createConversationRepository(database.connection);
+    const conversation = conversations.create('Client export', 'agent3d-local');
+    const modelId = randomUUID();
+    const artifact = artifacts.createPending({ conversationId: conversation.id, brief: 'Client GLB',
+      script: JSON.stringify({ format: 'three-script-v1', source: 'return new THREE.Mesh();', modelId }) });
+    vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co');
+    vi.stubEnv('SUPABASE_SECRET_KEY', 'storage-test-key');
+    vi.stubEnv('SUPABASE_STORAGE_BUCKET', 'agent3d');
+    const upload = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', upload);
+    const jsonText = '{"asset":{"version":"2.0"}}';
+    const json = new TextEncoder().encode(jsonText.padEnd(Math.ceil(jsonText.length / 4) * 4, ' '));
+    const bytes = new ArrayBuffer(20 + json.length); const header = new DataView(bytes);
+    header.setUint32(0, 0x46546c67, true); header.setUint32(4, 2, true); header.setUint32(8, bytes.byteLength, true);
+    header.setUint32(12, json.length, true); header.setUint32(16, 0x4e4f534a, true);
+    new Uint8Array(bytes, 20).set(json);
+    const path = `/api/artifacts/${artifact.id}/model`;
+    const unauthorized = await rendererRequest(app, path + '?expectedVersion=1', { method: 'POST', body: bytes, headers: { Cookie: 'username=other-user' } });
+    expect(unauthorized.status).toBe(401);
+    const stale = await rendererRequest(app, path + '?expectedVersion=2', { method: 'POST', body: bytes });
+    expect(stale.status).toBe(409);
+    const invalid = await rendererRequest(app, path + '?expectedVersion=1', { method: 'POST', body: new ArrayBuffer(20) });
+    expect(invalid.status).toBe(422);
+    expect(upload).not.toHaveBeenCalled();
+    const saved = await rendererRequest(app, path + '?expectedVersion=1', { method: 'POST', body: bytes });
+    expect(saved.status).toBe(204);
+    expect(upload).toHaveBeenCalledExactlyOnceWith(`https://example.supabase.co/storage/v1/object/agent3d/models/${modelId}.glb`, expect.objectContaining({ method: 'POST', body: bytes }));
+  });
+  it('reads native tool history and retries the persisted failed turn without duplicating its user message', async () => {
+    const { app, database } = await createFixture();
+    const repository = createConversationRepository(database.connection);
+    const conversation = repository.create('Retry after reload', 'agent3d-local');
+    const clientTurnId = randomUUID();
+    const user = { id: randomUUID(), conversationId: conversation.id, role: 'user' as const,
+      parts: [{ type: 'text' as const, text: '创建花瓶' }], status: 'complete' as const,
+      createdAt: new Date().toISOString() };
+    repository.beginTurn(conversation.id, clientTurnId, user);
+    // 模拟中断前 Mastra 原生写入的工具记录，而不是用应用格式伪装原生记录。
+    database.connection.prepare('INSERT INTO mastra_messages (id,thread_id,role,content,type,"createdAt","resourceId") VALUES (?,?,?,?,?,?,?)')
+      .run(randomUUID(), conversation.id, 'assistant', JSON.stringify({ format: 2, parts: [
+        { type: 'step-start' }, { type: 'tool-invocation', toolInvocation: {
+          state: 'result', toolCallId: 'analyze', toolName: 'analyze-input', args: {}, result: { latestUserText: '创建花瓶' },
+        } },
+      ] }), 'v2', new Date().toISOString(), 'agent3d-local');
+    repository.failTurn(conversation.id, clientTurnId, { id: randomUUID(), conversationId: conversation.id,
+      role: 'assistant', parts: [{ type: 'text', text: '连接中断' }], status: 'error', createdAt: new Date().toISOString() });
+    const historyResponse = await rendererRequest(app, `/api/conversations/${conversation.id}/messages`);
+    expect(historyResponse.status).toBe(200);
+    const history = await historyResponse.json();
+    const restored = history.messages.find((message: { id: string }) => message.id === user.id);
+    expect(restored.clientTurnId).toBe(clientTurnId);
+    expect(JSON.stringify(history)).toContain('tool-output-available');
+    const upstream = vi.fn(async () => new Response('data: {"type":"finish"}\n\ndata: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+    vi.stubGlobal('fetch', upstream);
+    const response = await rendererRequest(app, '/api/chat', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversationId: conversation.id,
+        clientTurnId, messages: [{ id: restored.id, role: restored.role, parts: restored.parts }],
+        attachmentIds: [], model: DEFAULT_MODEL_SELECTION.chat, apiKey: 'test-key',
+      }) });
+    expect(response.status).toBe(200);
+    expect(await response.text()).not.toContain('"type":"error"');
+    const forwarded = JSON.parse(String((upstream.mock.calls as unknown as [string, RequestInit][])[0]![1].body));
+    expect(forwarded.memory.options).toEqual({ lastMessages: false, readOnly: true });
+    expect(repository.listMessages(conversation.id).filter(message => message.role === 'user')).toHaveLength(1);
+    expect(repository.getTurn(conversation.id, clientTurnId)?.state).toBe('complete');
+  });
   it('previews pending GLB and downloads the same binary after approval', async () => {
     const { app, artifacts, database } = await createFixture();
     const created = await rendererRequest(app, '/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });

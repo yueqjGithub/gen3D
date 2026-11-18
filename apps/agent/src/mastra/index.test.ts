@@ -23,27 +23,13 @@ it('keeps JSON-looking trace previews as text in the Studio list and detail', as
   }
 });
 
-it('loads the shared directory from the Mastra project root even when the working directory changes', async () => {
-  const project = mkdtempSync(join(tmpdir(), 'agent3d-agent-config-'));
-  const publicDirectory = join(project, 'public');
-  const previousDirectory = process.cwd();
-  const previousRoot = process.env.MASTRA_PROJECT_ROOT;
-  const previousDataDirectory = process.env.AGENT3D_DATA_DIR;
-  process.env.AGENT3D_DATA_DIR = 'relative-path';
-  mkdirSync(publicDirectory);
-  writeFileSync(join(project, '.env'), 'AGENT3D_DATA_DIR=relative-path\n');
-  process.env.MASTRA_PROJECT_ROOT = project;
-  process.chdir(publicDirectory);
+it('requires explicit Supabase configuration instead of silently creating a local database', async () => {
+  const previous = process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL;
   try {
-    await expect(import('./index')).rejects.toThrow(
-      'AGENT3D_DATA_DIR must be an absolute path.',
-    );
+    await expect(import('./index')).rejects.toThrow('Missing DATABASE_URL.');
   } finally {
-    process.chdir(previousDirectory);
-    if (previousDataDirectory === undefined) delete process.env.AGENT3D_DATA_DIR;
-    else process.env.AGENT3D_DATA_DIR = previousDataDirectory;
-    if (previousRoot === undefined) delete process.env.MASTRA_PROJECT_ROOT;
-    else process.env.MASTRA_PROJECT_ROOT = previousRoot;
-    rmSync(project, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previous;
   }
 });

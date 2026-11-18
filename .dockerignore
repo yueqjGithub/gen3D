@@ -16,3 +16,5 @@ data
 deploy/.env
 docs
 **/*.log
+**/*secrets.json
+**/.wrangler

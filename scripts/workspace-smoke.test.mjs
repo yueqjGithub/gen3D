@@ -33,7 +33,7 @@ test('Mastra owns the fixed Agent port and reads provider keys from its local en
 
   assert.equal(packageJson.name, '@agent3d/agent');
   assert.deepEqual(Object.keys(packageJson.scripts).sort(), ['build', 'dev', 'start']);
-  assert.equal(packageJson.scripts.dev, 'pnpm dotenv run -f ../../.env mastra dev');
+  assert.equal(packageJson.scripts.dev, 'pnpm dotenv run -f ../../.env -f ../../.env.supabase mastra dev');
   assert.equal(packageJson.devDependencies?.hono, undefined);
   assert.deepEqual(environmentExample.match(/^[A-Z_]+=.*$/gm), [
     'AGNES_API_KEY=',
@@ -45,7 +45,7 @@ test('Mastra owns the fixed Agent port and reads provider keys from its local en
   assert.match(entrypoint, /path:\s*'\/chat\/:agentId'/);
   assert.match(entrypoint, /version:\s*'v7'/);
   assert.match(entrypoint, /sendReasoning:\s*true/);
-  assert.match(entrypoint, /context\.get\('requestContext'\)\.set\('agent3d', agent3d\)/);
+  assert.match(entrypoint, /context\.get\('requestContext'\)\.set\('getAgentApiKey'/);
   assert.match(agent, /instructions:\s*`/);
   assert.match(agent, /tools:\s*\(\{\s*requestContext\s*\}\)\s*=>\s*\{/);
   assert.match(agent, /process\.env\.AGNES_API_KEY/);
@@ -104,19 +104,19 @@ test('desktop components use the shared local API directly without an injected c
   }
 });
 
-test('Agent environment example documents the shared data directory and credentials', () => {
+test('environment templates separate local addresses, Supabase and server credentials', () => {
   const agentEnvironment = read('apps/agent/.env.example');
   const documented = read('README.md');
 
-  assert.equal(existsSync(join(root, '.env.example')), false);
+  assert.equal(existsSync(join(root, '.env.example')), true);
   assert.deepEqual(agentEnvironment.match(/^[A-Z0-9_]+=.*$/gm), [
-    'AGENT3D_DATA_DIR=',
     'AGNES_API_KEY=',
     'OPENAI_API_KEY=',
     'ANTHROPIC_API_KEY=',
   ]);
   assert.match(documented, /AGNES_API_KEY/);
-  assert.match(documented, /apps\/agent\/\.env/);
+  assert.ok(existsSync(join(root, 'deploy/supabase.env.example')));
+  assert.ok(existsSync(join(root, 'deploy/server.env.example')));
   for (const port of ['5173', '62586', '62687']) {
     assert.ok(documented.includes(port), `README is missing fixed port ${port}`);
   }

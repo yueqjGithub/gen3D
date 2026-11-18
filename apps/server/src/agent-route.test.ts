@@ -1,13 +1,19 @@
 import { Hono } from 'hono';
-import Database from 'better-sqlite3';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { RequestContext } from '../../agent/node_modules/@mastra/core/dist/request-context/index.js';
 import { expect, it, vi } from 'vitest';
-import { createTestDirectory } from './test-directory';
+// 原生 Agent 路由用内存存储验证，不连接正式 PostgreSQL。
+vi.mock('@mastra/pg', async () => {
+  const { LibSQLStore } = await import('@mastra/libsql');
+  return { PostgresStore: class extends LibSQLStore {
+    constructor() { super({ id: 'agent-route-test', url: ':memory:' }); }
+  } };
+});
 
 it('runs the Mastra chat route with request context and returns native text output', async () => {
-  const previousDirectory = process.env.AGENT3D_DATA_DIR;
-  process.env.AGENT3D_DATA_DIR = createTestDirectory('agent-route-');
+  vi.stubEnv('DATABASE_URL', 'postgresql://test:test@localhost:5432/postgres');
+  vi.stubEnv('SUPABASE_CA_PATH', fileURLToPath(new URL('../../../deploy/supabase-ca.crt', import.meta.url)));
   const { mastra } = await import('../../agent/src/mastra/index');
   try {
     const route = mastra.getServer()?.apiRoutes?.find((item) => item.path === '/chat/:agentId');
@@ -62,22 +68,16 @@ it('runs the Mastra chat route with request context and returns native text outp
       expect(JSON.parse(String(request?.[1]?.body)).model).toBe('gpt-4.1-mini');
       expect(new Headers(request?.[1]?.headers).get('authorization')).toBe('Bearer example-test-key');
       await mastra.observability.flush();
-      const database = new Database(join(process.env.AGENT3D_DATA_DIR!, 'agent3d.sqlite'), { readonly: true });
-      try {
-        const tables = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[];
-        const rows = tables.flatMap(({ name }) => database.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`).all());
-        expect(rows.length).toBeGreaterThan(0);
-        expect(JSON.stringify(rows).includes('example-test-key')).toBe(false);
-      } finally {
-        database.close();
-      }
+      const traces = await mastra.getStorage()?.getStore('observability');
+      const stored = await traces?.listTracesLight({});
+      expect(stored?.spans.length).toBeGreaterThan(0);
+      expect(JSON.stringify(stored)).not.toContain('example-test-key');
     } finally {
       vi.unstubAllGlobals();
     }
   } finally {
     await mastra.getStorage()?.init();
     await mastra.getStorage()?.close();
-    if (previousDirectory === undefined) delete process.env.AGENT3D_DATA_DIR;
-    else process.env.AGENT3D_DATA_DIR = previousDirectory;
+    vi.unstubAllEnvs();
   }
 }, 60000);

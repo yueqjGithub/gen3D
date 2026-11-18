@@ -1,58 +1,14 @@
-# agent
+# 独立 Mastra Agent
 
-Welcome to your new [Mastra](https://mastra.ai) project! We're excited to see what you build.
+端口 62687。提示词和工具在 src/mastra/agents/agent.ts，注册、原生 chatRoute、PostgreSQL 和 Trace 在 src/mastra/index.ts。Server 经 HTTP /chat/asset-creation-agent 调用。
 
-This starter provides you with a general-purpose Mastra agent that can research current information, manage multi-step tasks, work with local files, run approved shell commands, and create recurring schedules.
-
-## Features
-
-- A local `workspace/` for files and command execution (created under `src/mastra/public/workspace/` when running `mastra dev`)
-- Approval gates for file changes, deletions, and shell commands
-- Conversation memory, generated thread titles, and task tracking
-- Built-in web search and direct web page fetching
-- Recurring schedules that persist across restarts
-- Local libSQL storage and DuckDB observability, with optional Turso storage
-- A bundled Mastra skill that helps coding agents use current Mastra APIs
-
-## Get started
-
-Set your `OPENAI_API_KEY` in `.env` or in your environment, then run:
-
-```shell
-pnpm run dev
+```powershell
+pnpm --filter @agent3d/agent dev
+pnpm --filter @agent3d/agent build
 ```
 
-Open [http://localhost:4111](http://localhost:4111) in your browser to access [Mastra Studio](https://mastra.ai/docs/studio/overview).
+读取根 .env 与 .env.supabase，Studio 在 http://127.0.0.1:62687，使用云数据库 agent3d schema。Studio 可选密钥 AGNES_API_KEY 放根 .env；工作台密钥由用户在界面填写。
 
-Select **Agent** in Mastra Studio and try one of these prompts:
+Agent 的 generate-three-model 只做语法转换与脚本准备，不启动 Chromium。Web/Desktop 的隔离 iframe 执行源码、导出 GLB，再经 Server 上传 Supabase。工具成功不等于 GLB 已保存，资产面板负责显示构建与上传状态。
 
-- `Get the weather forecast for Austin this weekend.`
-- `Create a landing page for a Japanese sakura festival.`
-- `Check the SPCX stock price now, then check it every minute.`
-
-The agent asks for approval before it changes files or runs commands. When it creates a schedule, it returns an ID that you can use to pause the schedule.
-
-## Workspace safety
-
-The local filesystem tools stay inside the `workspace/` directory, which resolves relative to the server's working directory (`src/mastra/public/workspace/` during `mastra dev`). Shell commands start in that directory, but `LocalSandbox` does not provide operating-system isolation by default. Review command approvals carefully, and do not expose this template through an unauthenticated public server.
-
-## Storage
-
-The default `file:./mastra.db` database stores agent memory, tasks, and schedules locally. To use Turso, set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in `.env`.
-
-Recurring schedules continue to use model tokens until you pause them. Ask the agent to pause a schedule with the ID returned by `start_schedule`.
-
-## Making it yours
-
-- Edit `src/mastra/agents/agent.ts` to change the model, instructions, memory, workspace, or approval policy.
-- Edit `src/mastra/tools/` to customize scheduling.
-- Edit `src/mastra/index.ts` to change storage and observability.
-- Add files or reusable skills under `src/mastra/public/workspace/` for the agent to use during `mastra dev`.
-
-## Learn more
-
-To learn more about Mastra, visit our [documentation](https://mastra.ai/docs/). If you're new to AI agents, check out our [course](https://mastra.ai/learn) and [YouTube videos](https://youtube.com/@mastra-ai). You can also join our [Discord](https://discord.gg/mastra-ai) community to get help and share your projects.
-
-## Deploy to the Mastra platform
-
-The [Mastra platform](https://projects.mastra.ai) provides two products for deploying and managing AI applications built with the Mastra framework. Learn more in the [Mastra platform documentation](https://mastra.ai/docs/mastra-platform/overview).
+整体结构和部署状态见 [部署记录](../../deploy-record.md)。

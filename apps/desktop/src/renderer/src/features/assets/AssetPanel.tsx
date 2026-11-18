@@ -11,12 +11,13 @@ export interface AssetPanelProps {
   onChange(artifact: AssetArtifact): void;
 }
 
-/** 编辑、校验和审批生成的 Blender 脚本；脚本不会在桌面端执行。 */
+/** 源码在隔离 iframe 中执行，导出的 GLB 上传成功后才允许批准下载。 */
 export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
   const model = useMemo(() => readThreeModel(artifact.script), [artifact.script]);
   const [script, setScript] = useState(artifact.script);
   const [validation, setValidation] = useState<ScriptValidation | null>(null);
   const [busy, setBusy] = useState(false);
+  const [modelReady, setModelReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // 资产或版本变化时重新读取服务端校验结果，忽略旧请求的迟到响应。
@@ -92,7 +93,7 @@ export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
 
   // 必须先保存修改并通过静态检查，才能批准；只有批准后的脚本可以下载。
   const hasChanges = script !== artifact.script;
-  const canApprove = artifact.status === 'pending' && !hasChanges && validation?.ok === true;
+  const canApprove = artifact.status === 'pending' && !hasChanges && validation?.ok === true && (!model || modelReady);
 
   return (
     <aside className="asset-panel" aria-label="资产审阅">
@@ -112,7 +113,7 @@ export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
         <p>版本 {artifact.version} · 编辑后需重新批准</p>
       </section>
 
-      {model && <ModelPreview artifactId={artifact.id} />}
+      {model && <ModelPreview key={artifact.id} artifactId={artifact.id} version={artifact.version} source={model.source} status={artifact.status} onReady={setModelReady} />}
       <details open={!model}>
         <summary>{model ? '查看建模脚本' : '查看或编辑脚本'}</summary>
       <div className="asset-panel__editor">
@@ -169,7 +170,7 @@ export function AssetPanel({ artifact, onChange }: AssetPanelProps) {
         </button>
       </div>
       <p className="asset-panel__disclaimer">
-        {model ? '预览加载已导出的 GLB；修改模型请在聊天中提出要求。' : '脚本仅做静态检查，请在 Blender 中审阅后再运行。'}
+        {model ? '脚本由客户端隔离执行；GLB 保存后可跨设备查看。修改模型请在聊天中提出要求。' : '脚本仅做静态检查，请在 Blender 中审阅后再运行。'}
       </p>
     </aside>
   );

@@ -207,7 +207,7 @@ export const api = {
       return {
         id: message.id,
         role: message.role,
-        metadata: { persistedStatus: message.status },
+        metadata: { persistedStatus: message.status, clientTurnId: message.clientTurnId },
         parts,
       };
     }));
@@ -223,6 +223,11 @@ export const api = {
     return uploadMetadataSchema.parse((response as { attachment: unknown }).attachment);
   },
   getArtifact,
+  async saveModel(id: string, expectedVersion: number, bytes: ArrayBuffer) {
+    await request(`/artifacts/${encodeURIComponent(id)}/model?expectedVersion=${expectedVersion}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes,
+    });
+  },
   async updateArtifact(id: string, expectedVersion: number, script: string) {
     // expectedVersion 交给服务端做乐观锁检查，避免覆盖别处的新版本。
     const response = await request(`/artifacts/${encodeURIComponent(id)}`, {

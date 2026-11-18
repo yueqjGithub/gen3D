@@ -1,0 +1,51 @@
+name: Node backend container
+on:
+  push:
+    branches: [codex/deploy-node]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - name: Build backend image without any production secrets
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: backend
+          platforms: linux/amd64
+          load: true
+          tags: agent3d-backend:check
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Check both independent Node processes
+        shell: bash
+        run: |
+          docker run -d --name agent3d-check -p 62586:62586 \
+            -e DATABASE_URL=postgresql://check:check@127.0.0.1:5432/postgres \
+            -e SUPABASE_URL=https://example.invalid \
+            -e SUPABASE_SECRET_KEY=check-only \
+            -e SESSION_SECRET=check-only \
+            agent3d-backend:check
+          ready=false
+          for attempt in $(seq 1 60); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: http://localhost:5173' http://127.0.0.1:62586/api/login || true)
+            if [ "$status" = 401 ] && docker exec agent3d-check node -e "fetch('http://127.0.0.1:62687/api/agents').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then docker logs agent3d-check; exit 1; fi
+          docker image inspect agent3d-backend:check --format '{{.Size}} bytes'
+          docker stop agent3d-check
+          echo 'Node Server and independent Mastra Agent started successfully.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs agent3d-check || true

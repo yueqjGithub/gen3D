@@ -149,13 +149,22 @@ export function ChatView({
       setActionError('请先在模型设置中填写 API Key。');
       return;
     }
+    // 刷新会清空 ref，但数据库返回的用户消息 metadata 仍包含原来的轮次 ID。
+    // regenerate 会删掉最后一条助手消息再发送用户消息；这里先恢复轮次和附件引用。
+    const newestFirst = [...chat.messages].reverse();
+    const userMessage = clientTurnId.current
+      ? newestFirst.find(message => message.role === 'user')
+      : newestFirst.find(message => message.role === 'user' && message.metadata?.clientTurnId);
+    clientTurnId.current = userMessage?.metadata?.clientTurnId ?? clientTurnId.current;
+    attachmentIds.current = userMessage?.parts.flatMap(part =>
+      part.type === 'data-attachment' ? [part.data.id] : []) ?? [];
     if (!clientTurnId.current) {
       setActionError('当前请求没有可重试的会话标识。请重新发送消息。');
       return;
     }
     setActionError(null);
     try {
-      await chat.regenerate();
+      await chat.regenerate({ messageId: userMessage?.id });
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '重试失败。');
     }
@@ -215,9 +224,9 @@ export function ChatView({
           <p className="chat-view__waiting" role="status"><span className="loading-dot" aria-hidden="true" />正在等待 Agent 回复…</p>
         )}
       </div>
-      {chat.error && (
+      {(chat.error || chat.messages.at(-1)?.metadata?.persistedStatus === 'error') && (
         <div className="chat-view__error" role="alert">
-          <span>{chat.error.message}</span>
+          <span>{chat.error?.message ?? '上次生成未完成，可以重试。'}</span>
           <button type="button" onClick={() => void retry()} disabled={busy || !apiKey.trim()}>
             重试
           </button>

@@ -14,7 +14,7 @@ const previousAgnesChatModelId = 'agnes/agnes-2.5-flash';
 export function createSettingsRepository(database: SqliteDatabase) {
   return {
     /** 读取已保存的选择；没有保存过时返回默认值。 */
-    getModelSelection(): ModelSelection {
+    getModelSelection(_username?: string): ModelSelection {
       const row = database.prepare('SELECT value FROM settings WHERE key = ?')
         .get(selectionKey) as { value: string } | undefined;
       let stored = row
@@ -42,7 +42,7 @@ export function createSettingsRepository(database: SqliteDatabase) {
     },
 
     /** 保存选择；使用 UPSERT，所以首次写入和覆盖更新都是同一条语句。 */
-    saveModelSelection(selection: ModelSelection): void {
+    saveModelSelection(selection: ModelSelection, _username?: string): void {
       const valid = modelSelectionSchema.parse(selection);
       database.prepare(`
         INSERT INTO settings (key, value, updated_at)

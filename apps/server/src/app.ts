@@ -1,3 +1,4 @@
+import type { Repository } from './storage/repository';
 import { Hono } from 'hono';
 import { createConversationRoutes } from './routes/conversations';
 import { createAttachmentRoutes } from './routes/attachments';
@@ -11,21 +12,23 @@ import type { PreferenceRepository } from './storage/preferences';
 import type { createSettingsRepository } from './config/settings-repository';
 import { toApiErrorResponse } from './http-errors';
 import { createLocalOriginMiddleware } from './middleware/local-origin';
-import { getCookie } from 'hono/cookie';
-import { createLoginRoute } from './routes/login';
+import { getCookie, getSignedCookie } from 'hono/cookie';
+import { createLoginRoute, type LoginRepository } from './routes/login';
 import type { createLoginRepository } from './storage/login';
 
 /**
- * Hono 应用的依赖：全部是在 index.ts 中创建好的 SQLite 仓库。
- * 路由通过参数拿到这些仓库，因此测试时可以换成内存数据库。
+ * Hono 应用的依赖：index.ts 创建 PostgreSQL 和私有 Storage 仓库后交给这里。
+ * 测试保留独立 SQLite fixture，不连接用户的正式数据库。
  */
 export interface CreateAppDependencies {
-  conversations: ReturnType<typeof createConversationRepository>;
-  artifacts: ReturnType<typeof createArtifactRepository>;
-  attachments: AttachmentStore;
-  preferences: PreferenceRepository;
-  settings: ReturnType<typeof createSettingsRepository>;
-  users: ReturnType<typeof createLoginRepository>;
+  conversations: Repository<ReturnType<typeof createConversationRepository>>;
+  artifacts: Repository<ReturnType<typeof createArtifactRepository>>;
+  attachments: Repository<AttachmentStore>;
+  preferences: Repository<PreferenceRepository>;
+  settings: Repository<ReturnType<typeof createSettingsRepository>>;
+  users: LoginRepository;
+  /** 仅公网部署配置；用于签发和验证登录凭证，不能放进前端构建。 */
+  sessionSecret?: string;
 }
 
 /**
@@ -35,19 +38,20 @@ export function createApp(dependencies: CreateAppDependencies) {
   const app = new Hono();
   // 所有 /api 请求都先经过来源校验（同时负责 CORS 响应头）
   app.use('/api/*', createLocalOriginMiddleware());
-  app.route('/api', createLoginRoute(dependencies.users));
+  app.route('/api', createLoginRoute(dependencies.users, dependencies.sessionSecret));
 
   // 除登录与修改密码以外的接口均要求 Cookie 指向一个已存在的用户。
   app.use('/api/*', async (context, next) => {
     const username = getCookie(context, 'username');
-    if (!username || !dependencies.users.get(username)) {
+    if (!username || !await dependencies.users.get(username)
+      || (dependencies.sessionSecret && await getSignedCookie(context, dependencies.sessionSecret, 'session') !== username)) {
       return context.json({ code: 'UNAUTHORIZED', message: '请先登录。', retryable: false }, 401);
     }
     // 资产使用独立 ID 访问，检查资产对应的会话是否属于当前用户。
     const match = /^\/api\/artifacts\/([^/]+)/.exec(context.req.path);
     if (match) {
-      const artifact = dependencies.artifacts.get(decodeURIComponent(match[1]!));
-      if (!artifact || !dependencies.conversations.get(artifact.conversationId, username)) {
+      const artifact = await dependencies.artifacts.get(decodeURIComponent(match[1]!));
+      if (!artifact || !await dependencies.conversations.get(artifact.conversationId, username)) {
         return context.json({ code: 'NOT_FOUND', message: '资产不存在。', retryable: false }, 404);
       }
     }

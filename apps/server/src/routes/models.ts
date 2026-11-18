@@ -1,3 +1,4 @@
+import type { Repository } from '../storage/repository';
 import { Hono } from 'hono';
 import { modelSelectionSchema } from '@agent3d/shared';
 import { z } from 'zod';
@@ -7,7 +8,7 @@ import type { PreferenceRepository } from '../storage/preferences';
 import { HttpError } from '../http-errors';
 import { getCookie } from 'hono/cookie';
 
-type SettingsRepository = ReturnType<typeof createSettingsRepository>;
+type SettingsRepository = Repository<ReturnType<typeof createSettingsRepository>>;
 
 const preferenceRequestSchema = z.object({
   key: z.string().trim().min(1).max(80),
@@ -20,7 +21,7 @@ const deletePreferenceRequestSchema = z.object({
 
 export interface SettingsRouteDependencies {
   settings: SettingsRepository;
-  preferences: PreferenceRepository;
+  preferences: Repository<PreferenceRepository>;
 }
 
 /** 模型设置与用户偏好两组接口：都很小，所以放在同一个路由文件里。 */
@@ -28,9 +29,9 @@ export function createModelSettingsRoutes({ settings, preferences }: SettingsRou
   const routes = new Hono();
 
   // 返回可选的提供商列表和当前选择，设置页面据此渲染
-  routes.get('/models', (context) => context.json({
+  routes.get('/models', async (context) => context.json({
     providers: providerOptions,
-    selection: settings.getModelSelection(),
+    selection: (await settings.getModelSelection(getCookie(context, 'username')!)),
   }));
 
   // 保存模型选择：先用 zod 校验结构，再逐个角色（chat / image）确认模型存在于目录中
@@ -44,22 +45,22 @@ export function createModelSettingsRoutes({ settings, preferences }: SettingsRou
         throw new HttpError(400, 'PROVIDER_ERROR', `The selected ${role} provider or model is unsupported.`);
       }
     }
-    settings.saveModelSelection(selection);
-    return context.json({ selection: settings.getModelSelection() });
+    (await settings.saveModelSelection(selection, getCookie(context, 'username')!));
+    return context.json({ selection: (await settings.getModelSelection(getCookie(context, 'username')!)) });
   });
 
   // 用户偏好：Agent 会读取它们作为上下文；新增/修改由用户在界面确认后才会调用这里
-  routes.get('/preferences', (context) => context.json({ preferences: preferences.list(getCookie(context, 'username')!) }));
+  routes.get('/preferences', async (context) => context.json({ preferences: (await preferences.list(getCookie(context, 'username')!)) }));
 
   routes.put('/preferences', async (context) => {
     const body = preferenceRequestSchema.parse(await context.req.json());
-    preferences.upsert(body.key, body.value, getCookie(context, 'username')!);
-    return context.json({ preferences: preferences.list(getCookie(context, 'username')!) });
+    (await preferences.upsert(body.key, body.value, getCookie(context, 'username')!));
+    return context.json({ preferences: (await preferences.list(getCookie(context, 'username')!)) });
   });
 
   routes.delete('/preferences', async (context) => {
     const { key } = deletePreferenceRequestSchema.parse(await context.req.json());
-    if (!preferences.delete(key, getCookie(context, 'username')!)) {
+    if (!(await preferences.delete(key, getCookie(context, 'username')!))) {
       throw new HttpError(404, 'NOT_FOUND', 'The requested preference does not exist.');
     }
     return context.body(null, 204);

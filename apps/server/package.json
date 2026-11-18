@@ -4,11 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --external:@hono/node-server --external:ai --external:better-sqlite3 --external:hono --external:pdfjs-dist --external:zod --outfile=dist/index.js && node -e \"const fs=require('node:fs');fs.mkdirSync('dist/migrations',{recursive:true});fs.cpSync('src/storage/migrations','dist/migrations',{recursive:true})\"",
-    "start": "node --env-file-if-exists=../../.env dist/index.js",
+    "dev": "node --env-file-if-exists=../../.env --env-file=../../.env.supabase --env-file=../../.env.server --import tsx --watch src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --external:@mastra/pg --external:@mastra/libsql --external:@hono/node-server --external:ai --external:better-sqlite3 --external:hono --external:pdfjs-dist --external:zod --outfile=dist/index.js",
+    "start": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.supabase --env-file-if-exists=../../.env.server dist/index.js",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "db:init": "node scripts/initialize-postgres.mjs"
   },
   "dependencies": {
     "@agent3d/shared": "workspace:*",
@@ -18,7 +19,8 @@
     "better-sqlite3": "13.0.3",
     "hono": "4.13.14",
     "pdfjs-dist": "6.4.299",
-    "zod": "4.6.7"
+    "zod": "4.6.7",
+    "@mastra/pg": "1.36.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",

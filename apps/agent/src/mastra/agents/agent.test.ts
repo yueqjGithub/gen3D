@@ -4,10 +4,12 @@ import { handleChatStream } from '@mastra/ai-sdk';
 import { Mastra } from '@mastra/core/mastra';
 import { LibSQLStore } from '@mastra/libsql';
 import { afterEach, describe, expect, it } from 'vitest';
-import { agent } from './agent.js';
+import { createAssetAgent } from './agent.js';
+import { generateThreeModel } from '../tools/generate-three-model.js';
 import { agentChatRequestContextSchema } from '@agent3d/shared';
 
 const originalAgnesApiKey = process.env.AGNES_API_KEY;
+const agent = createAssetAgent(generateThreeModel);
 
 afterEach(() => {
   if (originalAgnesApiKey === undefined) {
@@ -90,6 +92,14 @@ describe('3D asset agent', () => {
     const requestContext = createRequestContext('hello');
     const context = requestContext.get('agent3d') as { apiKey: string };
     context.apiKey = '';
+    await expect(agent.getModel({ requestContext })).rejects.toThrow();
+  });
+
+  it('lists tools for API discovery without allowing a model call without request configuration', async () => {
+    const requestContext = new RequestContext();
+    const tools = await agent.listTools({ requestContext });
+    expect(Object.keys(tools)).toContain('generate-three-model');
+    expect(Object.keys(tools)).toContain('ask-user');
     await expect(agent.getModel({ requestContext })).rejects.toThrow();
   });
 

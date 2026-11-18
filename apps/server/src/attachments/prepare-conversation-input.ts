@@ -1,3 +1,4 @@
+import type { Repository } from '../storage/repository';
 import { supportedImageMediaTypes } from '@agent3d/shared';
 import type { AttachmentStore } from '../storage/attachments';
 import {
@@ -37,7 +38,7 @@ export function toInlineImageDataUrl(mediaType: string, bytes: Uint8Array): stri
  * 图片 → data URL；文档 → 提取文本，并限制所有文档合计的字符数，防止上下文过大。
  */
 export async function prepareConversationInput(
-  attachments: AttachmentStore,
+  attachments: Repository<AttachmentStore>,
   conversationId: string,
   attachmentIds: string[],
   supportsInlineImages: boolean,
@@ -47,7 +48,7 @@ export async function prepareConversationInput(
   }
 
   const available = new Map(
-    attachments.listByConversation(conversationId).map((attachment) => [attachment.id, attachment]),
+    (await attachments.listByConversation(conversationId)).map((attachment) => [attachment.id, attachment]),
   );
   const documents: PreparedConversationInput['documents'] = [];
   const images: PreparedConversationInput['images'] = [];

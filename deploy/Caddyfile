@@ -1,6 +1,6 @@
 {$SITE_ADDRESS} {
 	# 学习项目的外网入口。浏览器先通过这一层访问密码，再进入工程已有的登录页面。
-	# 这套入口面向同一位拥有者/可信使用者，应用里的用户名 Cookie 仍是简化实现。
+	# 应用本身也使用签名 Cookie 和云数据库密码哈希；这一层是额外的站点访问密码。
 	basic_auth {
 		{$DEPLOY_USER} {$DEPLOY_PASSWORD_HASH}
 	}
@@ -8,7 +8,7 @@
 	@api path /api /api/*
 	handle @api {
 		request_body {
-			max_size 11MB
+			max_size 21MB
 		}
 		reverse_proxy server:62586 {
 			# 逐块转发 SSE，用户等待问题或审批时也保持长响应。

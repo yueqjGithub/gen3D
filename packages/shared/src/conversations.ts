@@ -55,6 +55,8 @@ export const chatMessageSchema = z.object({
   parts: z.array(persistedMessagePartSchema),
   createdAt: z.iso.datetime(),
   status: z.enum(['complete', 'error']),
+  // 从 chat_turns 关联读取，刷新后重试仍使用原轮次，不另存一份消息。
+  clientTurnId: z.uuid().optional(),
 }).strict();
 
 /** 通过 `conversationSchema` 校验后的会话类型。 */

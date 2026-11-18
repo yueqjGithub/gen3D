@@ -18,3 +18,7 @@ apps/desktop/out/
 # 本地验证产物：独立数据库、浏览器状态及截图
 .verification/
 .test-tmp/
+apps/desktop/generated/
+deploy/cloudflare/.wrangler/
+deploy/cloudflare/*secrets.json
+deploy/cloudflare/worker-configuration.d.ts

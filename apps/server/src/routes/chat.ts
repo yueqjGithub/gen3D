@@ -1,3 +1,4 @@
+import type { Repository } from '../storage/repository';
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
@@ -23,6 +24,7 @@ import {
 import { z } from 'zod';
 import {
   AgentServiceUnavailableError,
+  AgentRateLimitError,
   streamAgent,
 } from '../agent-client';
 import { providerCatalog } from '../config/provider-catalog';
@@ -40,9 +42,9 @@ import {
 import type { createSettingsRepository } from '../config/settings-repository';
 import type { PreferenceRepository } from '../storage/preferences';
 
-type ConversationRepository = ReturnType<typeof createConversationRepository>;
-type ArtifactRepository = ReturnType<typeof createArtifactRepository>;
-type SettingsRepository = ReturnType<typeof createSettingsRepository>;
+type ConversationRepository = Repository<ReturnType<typeof createConversationRepository>>;
+type ArtifactRepository = Repository<ReturnType<typeof createArtifactRepository>>;
+type SettingsRepository = Repository<ReturnType<typeof createSettingsRepository>>;
 
 // 以下 schema 校验渲染进程提交的请求体。useChat 会把整段消息历史一起发来，
 // 但服务端只使用最后一条用户消息，历史以数据库为准，避免客户端伪造历史。
@@ -85,8 +87,8 @@ const chatRequestSchema = z.object({
 export interface ChatRouteDependencies {
   conversations: ConversationRepository;
   artifacts: ArtifactRepository;
-  attachments: AttachmentStore;
-  preferences: PreferenceRepository;
+  attachments: Repository<AttachmentStore>;
+  preferences: Repository<PreferenceRepository>;
   settings: SettingsRepository;
 }
 
@@ -232,7 +234,7 @@ function toAgentMessages(
 function appendStreamPart(
   writer: { write(part: ChatUIMessageChunk): void },
   part: PersistedMessagePart,
-  artifact: ReturnType<ArtifactRepository['get']>,
+  artifact: Awaited<ReturnType<ArtifactRepository['get']>>,
 ): void {
   if (part.type === 'ui-chunk') {
     writer.write(part.chunk as unknown as ChatUIMessageChunk);
@@ -268,14 +270,14 @@ function replayCompletedTurn(
   artifactRepository: ArtifactRepository,
 ): Response {
   const stream = createUIMessageStream<ChatUIMessage>({
-    execute: ({ writer }) => {
+    execute: async ({ writer }) => {
       writer.write({ type: 'start', messageId: turn.id });
       writer.write({ type: 'data-turn', data: { clientTurnId } });
       const nativeText = turn.parts.some(part => part.type === 'ui-chunk' && part.chunk.type === 'text-start');
       for (const part of turn.parts) {
         if (nativeText && (part.type === 'text' || part.type === 'reasoning')) continue;
         const artifact = part.type === 'asset'
-          ? artifactRepository.get(part.artifactId)
+          ? (await artifactRepository.get(part.artifactId))
           : null;
         appendStreamPart(writer, part, artifact);
       }
@@ -289,6 +291,9 @@ function replayCompletedTurn(
 
 /** 把流式过程中的异常转成可以展示给用户的提示；已知错误给出具体原因，其余用通用文案。 */
 function safeStreamError(error: unknown): { message: string; code: 'STREAM_FAILED'; retryable: boolean } {
+  if (error instanceof AgentRateLimitError) {
+    return { message: error.message, code: 'STREAM_FAILED', retryable: true };
+  }
   if (error instanceof AgentServiceUnavailableError) {
     return {
       message: 'The Agent service is unavailable. Retry the request.',
@@ -339,7 +344,8 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
   routes.post('/chat/answer', async context => {
     const body = z.object({ questionId: z.string().min(1), ...userAnswerSchema.shape }).strict().parse(await context.req.json());
     const question = pendingQuestions.get(body.questionId);
-    if (!question || !conversations.get(question.conversationId, getCookie(context, 'username')!)) {
+    if (!question || !(await conversations.get(question.conversationId, getCookie(context, 'username')!))
+      || pendingQuestions.get(body.questionId) !== question) {
       throw new HttpError(404, 'NOT_FOUND', '此问题已结束或不属于当前用户。');
     }
     pendingQuestions.delete(body.questionId);
@@ -353,7 +359,8 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
   routes.post('/chat/tool-approval', async context => {
     const decision = z.object({ approvalId: z.string().min(1), approved: z.boolean() }).strict().parse(await context.req.json());
     const pending = pendingApprovals.get(decision.approvalId);
-    if (!pending || !conversations.get(pending.conversationId, getCookie(context, 'username')!)) {
+    if (!pending || !(await conversations.get(pending.conversationId, getCookie(context, 'username')!))
+      || pendingApprovals.get(decision.approvalId) !== pending) {
       throw new HttpError(404, 'NOT_FOUND', '此工具确认已结束或不属于当前用户。');
     }
     pendingApprovals.delete(decision.approvalId);
@@ -363,7 +370,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
 
   routes.post('/chat', async (context) => {
     const body = chatRequestSchema.parse(await context.req.json());
-    const conversation = conversations.get(body.conversationId, getCookie(context, 'username')!);
+    const conversation = (await conversations.get(body.conversationId, getCookie(context, 'username')!));
     if (!conversation) {
       throw new HttpError(404, 'NOT_FOUND', 'The requested conversation does not exist.');
     }
@@ -371,7 +378,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     const input = readSubmittedTurn(
       body.messages,
       body.attachmentIds,
-      attachments.listByConversation(conversation.id),
+      (await attachments.listByConversation(conversation.id)),
     );
     const userMessage = chatMessageSchema.parse({
       id: randomUUID(),
@@ -383,15 +390,15 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     });
 
     // 幂等：已完成的轮次直接重放；仍在运行的轮次拒绝重复提交
-    const existing = conversations.getTurn(conversation.id, body.clientTurnId);
+    const existing = (await conversations.getTurn(conversation.id, body.clientTurnId));
     if (existing?.state === 'complete') {
-      const replay = conversations.beginTurn(conversation.id, body.clientTurnId, userMessage);
+      const replay = (await conversations.beginTurn(conversation.id, body.clientTurnId, userMessage));
       if (replay.assistantMessage) {
         return replayCompletedTurn(replay.assistantMessage, body.clientTurnId, artifacts);
       }
     }
     if (existing?.state === 'running') {
-      conversations.beginTurn(conversation.id, body.clientTurnId, userMessage);
+      (await conversations.beginTurn(conversation.id, body.clientTurnId, userMessage));
       throw new ChatTurnConflictError(body.clientTurnId);
     }
 
@@ -417,8 +424,10 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     // Desktop 只提交当前消息和附件 ID。Server 校验归属后从数据库补历史/偏好，从磁盘
     // 读取图片或提取文档文本，得到独立于 UI 展示格式的 AgentServiceRequest。
     // shared schema 描述本项目的 HTTP 入参约束，例如长度上限、模型配置和确认模式默认值。
-    const history = conversations.listMessages(conversation.id);
+    const history = (await conversations.listMessages(conversation.id));
     const agentRequest = agentServiceRequestSchema.parse({
+      conversationId: conversation.id,
+      resourceId: getCookie(context, 'username')!,
       toolApproval: body.toolApproval,
       model,
       apiKey: body.apiKey,
@@ -429,11 +438,11 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       ),
       documents: preparedInput.documents,
       images: preparedInput.images,
-      preferences: Object.entries(preferences.list(getCookie(context, 'username')!)).map(([key, value]) => ({ key, value })),
+      preferences: Object.entries((await preferences.list(getCookie(context, 'username')!))).map(([key, value]) => ({ key, value })),
     });
 
     // 在真正调用模型前把本轮标记为 running（并保存用户消息），崩溃后可据此重试
-    const turn = conversations.beginTurn(conversation.id, body.clientTurnId, userMessage);
+    const turn = (await conversations.beginTurn(conversation.id, body.clientTurnId, userMessage));
     if (turn.state === 'complete' && turn.assistantMessage) {
       return replayCompletedTurn(turn.assistantMessage, body.clientTurnId, artifacts);
     }
@@ -530,26 +539,27 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
           }
           if (context.req.raw.signal.aborted) throw new DOMException('Request aborted.', 'AbortError');
           if (output?.type === 'asset' && validateAssetScript(output.script).ok) {
-            // 工具成功导出 GLB 后，Server 创建可审批的业务资产，再额外发出 data-asset。
+            // 工具准备好源码后创建待审阅资产。客户端 iframe 负责执行、导出并上传 GLB，
+            // 文件保存成功前资产面板不能批准；这里不把“源码已准备”当成文件已存在。
             // ChatView 监听这个 part 并调用 onArtifactChange，右侧面板据此切换到新资产。
             // 普通回复中说“已完成”不会触发这里，必须有成功的工具输出。
-            const artifact = artifacts.createPending({ conversationId: conversation.id, brief: output.brief, script: output.script });
+            const artifact = (await artifacts.createPending({ conversationId: conversation.id, brief: output.brief, script: output.script }));
             writer.write({ type: 'data-asset', id: artifact.id, data: artifact });
             persistedParts.push({ type: 'asset', artifactId: artifact.id });
           }
           if (context.req.raw.signal.aborted) throw new DOMException('Request aborted.', 'AbortError');
-          conversations.completeTurn(conversation.id, body.clientTurnId, {
+          (await conversations.completeTurn(conversation.id, body.clientTurnId, {
             id: assistantMessageId, conversationId: conversation.id, role: 'assistant',
             parts: [{ type: 'text', text: streamedReply }, ...persistedParts],
             createdAt: new Date().toISOString(), status: 'complete',
-          });
+          }));
           writer.write({ type: 'finish', finishReason: 'stop' });
         } catch (error) {
           const failure = safeStreamError(error);
-          conversations.failTurn(conversation.id, body.clientTurnId, {
+          (await conversations.failTurn(conversation.id, body.clientTurnId, {
             id: assistantMessageId, conversationId: conversation.id, role: 'assistant',
             parts: [{ type: 'text', text: failure.message }], createdAt: new Date().toISOString(), status: 'error',
-          });
+          }));
           writer.write({ type: 'error', errorText: failure.message });
         } finally {
           clearInterval(heartbeat);

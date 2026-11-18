@@ -1,50 +1,42 @@
 import { serve, type ServerType } from '@hono/node-server';
-import { isAbsolute, join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readFileSync } from 'node:fs';
+import { PostgresStore } from '@mastra/pg';
 import { createApp } from './app';
-import { createSettingsRepository } from './config/settings-repository';
-import { createArtifactRepository } from './storage/artifacts';
-import { createAttachmentStore } from './storage/attachments';
-import { createConversationRepository } from './storage/conversations';
-import { createDatabase } from './storage/database';
-import { createPreferenceRepository } from './storage/preferences';
-import { createLoginRepository } from './storage/login';
+import { createPostgresRepositories } from './storage/postgres';
 
 // 本地默认地址与 Desktop 一致。容器可使用 HOST/PORT 调整监听地址。
 const serverURL = `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? 62586}`;
 
-/** startServer 的返回值：数据库文件位置，以及一个同时关闭 HTTP 服务和数据库的方法。 */
+/** 关闭 HTTP 服务后释放云数据库连接池。 */
 export interface StandaloneServer {
-  databasePath: string;
   close(): Promise<void>;
 }
 
 /**
- * 启动流程：确定数据目录 → 打开 SQLite（自动迁移）→ 创建仓库和 Hono 应用 → 监听 HTTP。
- * Agent 与 Server 使用 AGENT3D_DATA_DIR 指定的同一个绝对目录。
- * 测试可以传入独立目录，避免修改用户数据库。
+ * 启动流程：读取 Supabase 配置 → 创建 PostgreSQL 仓库 → Hono → 监听端口。
+ * Server 和独立 Agent 使用同一个 agent3d schema，附件和 GLB 使用私有 Storage。
+ * 初始化表是单独的部署命令；每次启动或聊天都不重新建表，也不新建本地 SQLite。
  */
-export async function startServer(
-  dataDirectory = process.env.AGENT3D_DATA_DIR ?? '',
-): Promise<StandaloneServer> {
-  if (!isAbsolute(dataDirectory)) {
-    throw new Error('AGENT3D_DATA_DIR must be an absolute path.');
+export async function startServer(): Promise<StandaloneServer> {
+  for (const key of ['DATABASE_URL', 'SUPABASE_CA_PATH', 'SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'SESSION_SECRET']) {
+    if (!process.env[key]) throw new Error(`Missing required configuration: ${key}`);
   }
-  const databasePath = join(dataDirectory, 'agent3d.sqlite');
-  const database = await createDatabase(databasePath);
-
-  // 每个仓库都共用同一个数据库连接；附件文件本身存放在 data/attachments 目录
-  const app = createApp({
-    conversations: createConversationRepository(database.connection),
-    artifacts: createArtifactRepository(database.connection),
-    attachments: createAttachmentStore(
-      database.connection,
-      process.env.AGENT3D_ATTACHMENT_DIR ?? join(dataDirectory, 'data', 'attachments'),
-    ),
-    preferences: createPreferenceRepository(database.connection),
-    settings: createSettingsRepository(database.connection),
-    users: createLoginRepository(database.connection),
+  const url = new URL(process.env.DATABASE_URL!);
+  url.port = '5432'; // Supabase Session pooler；Server 自己复用少量连接。
+  url.searchParams.delete('sslmode');
+  const storage = new PostgresStore({
+    id: 'server-postgres', connectionString: url.toString(), schemaName: 'agent3d', max: 2,
+    ssl: { ca: readFileSync(process.env.SUPABASE_CA_PATH!, 'utf8'), rejectUnauthorized: true },
+    disableInit: true,
   });
+  const app = createApp(createPostgresRepositories(storage, {
+    SUPABASE_URL: process.env.SUPABASE_URL!,
+    SUPABASE_SECRET_KEY: process.env.SUPABASE_SECRET_KEY!,
+    SUPABASE_STORAGE_BUCKET: process.env.SUPABASE_STORAGE_BUCKET || 'agent3d',
+    SESSION_SECRET: process.env.SESSION_SECRET!,
+  }));
   const server: ServerType = serve({
     fetch: app.fetch,
     // 容器需要监听网络接口；本地开发默认仍绑定回环地址。
@@ -59,20 +51,14 @@ export async function startServer(
       server.once('listening', resolveListening);
     });
   } catch (error) {
-    database.close();
+    await storage.close();
     throw error;
   }
 
   return {
-    databasePath,
     close: () => new Promise<void>((resolveClose, rejectClose) => {
       server.close((error) => {
-        database.close();
-        if (error) {
-          rejectClose(error);
-        } else {
-          resolveClose();
-        }
+        void storage.close().then(() => error ? rejectClose(error) : resolveClose(), rejectClose);
       });
     }),
   };

@@ -1,3 +1,4 @@
+import type { Repository } from '../storage/repository';
 import { Hono } from 'hono';
 import {
   MAX_ATTACHMENT_BYTES,
@@ -9,7 +10,7 @@ import { extractDocument } from '../attachments/extract-document';
 import { HttpError } from '../http-errors';
 import { getCookie } from 'hono/cookie';
 
-type ConversationRepository = ReturnType<typeof createConversationRepository>;
+type ConversationRepository = Repository<ReturnType<typeof createConversationRepository>>;
 // 各类文件的“魔数”（文件头），用来确认文件内容与声明的类型一致，防止改后缀伪装
 const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -71,7 +72,7 @@ async function validateDocument(mediaType: string, bytes: Uint8Array): Promise<v
 
 export interface AttachmentRouteDependencies {
   conversations: ConversationRepository;
-  attachments: AttachmentStore;
+  attachments: Repository<AttachmentStore>;
 }
 
 /**
@@ -83,8 +84,8 @@ export function createAttachmentRoutes({ conversations, attachments }: Attachmen
 
   // 图片预览也验证会话归属，不暴露任意磁盘路径。
   routes.get('/conversations/:id/attachments/:attachmentId', async (context) => {
-    const conversation = conversations.get(context.req.param('id'), getCookie(context, 'username')!);
-    const metadata = conversation && attachments.listByConversation(conversation.id)
+    const conversation = (await conversations.get(context.req.param('id'), getCookie(context, 'username')!));
+    const metadata = conversation && (await attachments.listByConversation(conversation.id))
       .find(item => item.id === context.req.param('attachmentId'));
     if (!metadata) throw new HttpError(404, 'NOT_FOUND', 'Attachment not found.');
     const bytes = await attachments.read(metadata.id);
@@ -93,7 +94,7 @@ export function createAttachmentRoutes({ conversations, attachments }: Attachmen
   });
 
   routes.post('/conversations/:id/attachments', async (context) => {
-    const conversation = conversations.get(context.req.param('id'), getCookie(context, 'username')!);
+    const conversation = (await conversations.get(context.req.param('id'), getCookie(context, 'username')!));
     if (!conversation) {
       throw new HttpError(404, 'NOT_FOUND', 'The requested conversation does not exist.');
     }

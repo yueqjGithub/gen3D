@@ -1,0 +1,23 @@
+{
+  "name": "agent3d-node",
+  "account_id": "155e8eb19a32b6370e91fe4dd375a9c8",
+  "main": "worker.ts",
+  "compatibility_date": "2026-11-18",
+  "workers_dev": true,
+  "assets": {
+    "directory": "../../apps/desktop/out/web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*"]
+  },
+  "containers": [{
+    "class_name": "Backend",
+    "scheduling_policy": "durable_object",
+    "images": { "base": { "dockerfile": "../../Dockerfile", "build_context": "../.." } },
+    "observability": { "logs": { "enabled": true } }
+  }],
+  "durable_objects": { "bindings": [{ "name": "BACKEND", "class_name": "Backend" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Backend"] }],
+  "vars": { "PUBLIC_ORIGIN": "https://agent3d-node.agent3d-workers-compatibility.workers.dev" },
+  "observability": { "enabled": true }
+}

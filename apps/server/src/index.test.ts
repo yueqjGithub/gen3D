@@ -1,71 +1,36 @@
-import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fileURLToPath } from 'node:url';
 import { startServer, type StandaloneServer } from './index';
-import { createTestDirectory } from './test-directory';
 
-const serverURL = 'http://127.0.0.1:62586';
+const closePool = vi.hoisted(() => vi.fn(async () => {}));
+// 启动测试只替换数据库连接，不修改生产入口，也不连接真实 Supabase。
+vi.mock('@mastra/pg', () => ({ PostgresStore: class {
+  db = {};
+  close = closePool;
+} }));
 const servers: StandaloneServer[] = [];
-
-function createDataDirectory(): string {
-  return createTestDirectory('server-');
-}
-
-afterEach(async () => {
-  for (const server of servers.splice(0)) {
-    await server.close();
-  }
+beforeEach(() => {
+  vi.stubEnv('DATABASE_URL', 'postgresql://test:test@localhost:5432/postgres');
+  vi.stubEnv('SUPABASE_CA_PATH', fileURLToPath(new URL('../../../deploy/supabase-ca.crt', import.meta.url)));
+  vi.stubEnv('SUPABASE_URL', 'https://example.supabase.co');
+  vi.stubEnv('SUPABASE_SECRET_KEY', 'test-secret');
+  vi.stubEnv('SESSION_SECRET', 'test-session-secret');
+  vi.stubEnv('PORT', '62885');
 });
-
-describe('Hono server', () => {
-  it('serves the real API on its fixed loopback port and preserves its database', async () => {
-    const dataDirectory = createDataDirectory();
-    const server = await startServer(dataDirectory);
-    servers.push(server);
-
-    expect(server.databasePath).toBe(join(dataDirectory, 'agent3d.sqlite'));
-
-    const origin = { Origin: 'http://localhost:5173' };
-    const login = await fetch(`${serverURL}/api/login`, {
-      method: 'POST',
-      headers: { ...origin, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'test-user', password: 'test' }),
-    });
-    expect(login.status).toBe(200);
-    const headers = { ...origin, Cookie: 'username=test-user' };
-    const createResponse = await fetch(`${serverURL}/api/conversations`, {
-      method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'Saved by Hono' }),
-    });
-    expect(createResponse.status).toBe(201);
-    const created = await createResponse.json() as {
-      conversation: { id: string; title: string };
-    };
-
-    const listResponse = await fetch(`${serverURL}/api/conversations`, { headers });
-    const list = await listResponse.json() as {
-      conversations: Array<{ id: string; title: string }>;
-    };
-    expect(list.conversations).toContainEqual(created.conversation);
-
-    const modelsResponse = await fetch(`${serverURL}/api/models`, { headers });
-    expect(modelsResponse.status).toBe(200);
-    await expect(modelsResponse.json()).resolves.toMatchObject({
-      selection: {
-        chat: {
-          providerId: 'agnes',
-          modelId: 'agnes/agnes-3.0-flash',
-        },
-      },
-    });
+afterEach(async () => {
+  for (const server of servers.splice(0)) await server.close();
+  vi.unstubAllEnvs();
+});
+describe('Node Hono server', () => {
+  it('serves the API on a real HTTP socket and closes its PostgreSQL pool', async () => {
+    const server = await startServer();
+    const response = await fetch('http://127.0.0.1:62885/api/login', { headers: { Origin: 'http://localhost:5173' } });
+    expect(response.status).toBe(401);
+    await server.close();
+    expect(closePool).toHaveBeenCalled();
   });
-
-  it('fails visibly when the fixed port is already in use', async () => {
-    const first = await startServer(createDataDirectory());
-    servers.push(first);
-
-    await expect(startServer(createDataDirectory())).rejects.toMatchObject({
-      code: 'EADDRINUSE',
-    });
+  it('releases the new pool when the configured port is already in use', async () => {
+    servers.push(await startServer());
+    await expect(startServer()).rejects.toMatchObject({ code: 'EADDRINUSE' });
   });
 });

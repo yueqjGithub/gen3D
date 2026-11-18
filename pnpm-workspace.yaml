@@ -13,3 +13,4 @@ allowBuilds:
   better-sqlite3: true
   '@parcel/watcher': false
   esbuild: false
+  workerd: false

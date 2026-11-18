@@ -18,6 +18,14 @@ export class AgentServiceUnavailableError extends Error {
   }
 }
 
+/** 上游明确限流时，给客户端可理解的提示，不泄露完整的上游异常和请求内容。 */
+export class AgentRateLimitError extends Error {
+  constructor() {
+    super('模型服务当前限流，请稍后重试或切换服务商。');
+    this.name = 'AgentRateLimitError';
+  }
+}
+
 /**
  * 调用 Mastra 原生 chat 路由，并把响应的 SSE 解析为 UI message chunk。
  * 这是 Hono 与 Agent 之间唯一的通信点：
@@ -30,6 +38,7 @@ export async function* streamAgent(
   signal: AbortSignal,
   confirmTool?: (approvalId: string) => Promise<boolean>,
   answerQuestion?: (questionId: string, question: UserQuestion) => Promise<UserAnswer>,
+  agentFetch: typeof fetch = fetch,
 ): AsyncGenerator<UIMessageChunk> {
   const latestMessage = request.messages.at(-1);
   // routes/chat.ts 已把数据库历史整理成 role/content。这里再转为 chatRoute 接受的
@@ -62,11 +71,17 @@ export async function* streamAgent(
   while (true) {
     let response: Response;
     try {
-      response = await fetch(agentURL, {
+      response = await agentFetch(agentURL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
         body: JSON.stringify({
           messages: approvalMessages,
+          // 历史已由 Server 整理并保存到 Mastra 原生表。lastMessages:false 只关闭读取，
+          // 必须同时设 readOnly:true 才不会重复写入模型内部的用户/工具消息。
+          // 但保留 thread/resource 关联，让 Trace、暂停快照和工作记忆都指向正确的会话/用户。
+          ...(request.conversationId && request.resourceId ? {
+            memory: { thread: request.conversationId, resource: request.resourceId, options: { lastMessages: false, readOnly: true } },
+          } : {}),
           ...continuation,
           // messages 是对话内容；agent3d 是本次调用所需的应用配置和工具上下文。
           // Agent 的路由中间件会把 agent3d 写入 Mastra RequestContext。
@@ -110,6 +125,7 @@ export async function* streamAgent(
       }
       // Agent 内部失败会以 error chunk 形式出现在流里，不透传上游可能包含密钥的错误。
       if (event.value.type === 'error') {
+        if (event.value.errorText === 'PROVIDER_RATE_LIMITED') throw new AgentRateLimitError();
         throw new Error('The Agent service could not complete the request.');
       }
       const chunk = event.value;
